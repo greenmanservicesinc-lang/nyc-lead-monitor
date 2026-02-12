@@ -49,68 +49,70 @@ def check_hpd_violations():
     
     base_url = "https://data.cityofnewyork.us/resource/wvxf-dwi5.json"
     
-    # Get violations from last 7 days (more reliable than 24 hours)
+    # Get violations from last 7 days
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     
-    try:
-        # Simple query without complex WHERE clause
-        params = {
-            '$where': f"inspectiondate > '{week_ago}T00:00:00'",
-            '$limit': 100,
-            'boro': 'BROOKLYN'
-        }
-        
-        response = requests.get(base_url, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"HPD API returned status {response.status_code}")
-            return []
-        
-        violations = response.json()
-        
-        if not isinstance(violations, list):
-            print(f"HPD API returned unexpected format")
-            return []
-        
-        new_violations = []
-        seen = load_seen_leads()
-        
-        # Filter for pest-related violations
-        pest_keywords = ['pest', 'roach', 'rodent', 'mice', 'rat', 'bedbug', 'bed bug', 'vermin', 'infestation']
-        
-        for v in violations:
-            if not isinstance(v, dict):
+    # Check all boroughs
+    boroughs = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN']
+    all_violations = []
+    
+    for borough in boroughs:
+        try:
+            params = {
+                '$where': f"inspectiondate > '{week_ago}T00:00:00'",
+                '$limit': 50,
+                'boro': borough
+            }
+            
+            response = requests.get(base_url, params=params, timeout=30)
+            
+            if response.status_code != 200:
+                print(f"HPD API ({borough}) returned status {response.status_code}")
                 continue
+            
+            violations = response.json()
+            
+            if not isinstance(violations, list):
+                continue
+            
+            seen = load_seen_leads()
+            
+            # Filter for pest-related violations
+            pest_keywords = ['pest', 'roach', 'rodent', 'mice', 'rat', 'bedbug', 'bed bug', 'vermin', 'infestation']
+            
+            for v in violations:
+                if not isinstance(v, dict):
+                    continue
+                    
+                description = str(v.get('novdescription', '')).lower()
                 
-            description = str(v.get('novdescription', '')).lower()
+                # Check if pest-related
+                if not any(keyword in description for keyword in pest_keywords):
+                    continue
+                
+                violation_id = v.get('violationid')
+                if violation_id and str(violation_id) not in seen['hpd']:
+                    all_violations.append({
+                        'id': str(violation_id),
+                        'address': f"{v.get('housenumber', '')} {v.get('streetname', '')}, {v.get('boro', '')}".strip(),
+                        'apartment': v.get('apartment', 'N/A'),
+                        'zip': v.get('zip', ''),
+                        'class': v.get('class', ''),
+                        'description': v.get('novdescription', ''),
+                        'inspection_date': v.get('inspectiondate', '')[:10] if v.get('inspectiondate') else '',
+                        'status': v.get('currentstatus', '')
+                    })
+                    seen['hpd'].append(str(violation_id))
             
-            # Check if pest-related
-            if not any(keyword in description for keyword in pest_keywords):
-                continue
+            seen['hpd'] = seen['hpd'][-2000:]
+            save_seen_leads(seen)
             
-            violation_id = v.get('violationid')
-            if violation_id and str(violation_id) not in seen['hpd']:
-                new_violations.append({
-                    'id': str(violation_id),
-                    'address': f"{v.get('housenumber', '')} {v.get('streetname', '')}, {v.get('boro', '')}".strip(),
-                    'apartment': v.get('apartment', 'N/A'),
-                    'zip': v.get('zip', ''),
-                    'class': v.get('class', ''),
-                    'description': v.get('novdescription', ''),
-                    'inspection_date': v.get('inspectiondate', '')[:10] if v.get('inspectiondate') else '',
-                    'status': v.get('currentstatus', '')
-                })
-                seen['hpd'].append(str(violation_id))
-        
-        seen['hpd'] = seen['hpd'][-1000:]
-        save_seen_leads(seen)
-        
-        print(f"Found {len(new_violations)} new HPD violations")
-        return new_violations
-        
-    except Exception as e:
-        print(f"Error checking HPD: {e}")
-        return []
+        except Exception as e:
+            print(f"Error checking HPD ({borough}): {e}")
+            continue
+    
+    print(f"Found {len(all_violations)} new HPD violations")
+    return all_violations
 
 def check_dohmh_violations():
     """Check DOHMH restaurant violations"""
@@ -120,59 +122,62 @@ def check_dohmh_violations():
     
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     
-    try:
-        # Pest violation codes: 04L, 04M, 04N, 08A
-        params = {
-            '$where': f"inspection_date > '{week_ago}T00:00:00'",
-            'violation_code': '04L',
-            'boro': 'Brooklyn',
-            '$limit': 50
-        }
-        
-        response = requests.get(base_url, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"DOHMH API returned status {response.status_code}")
-            return []
-        
-        violations = response.json()
-        
-        if not isinstance(violations, list):
-            print(f"DOHMH API returned unexpected format")
-            return []
-        
-        new_violations = []
-        seen = load_seen_leads()
-        
-        for v in violations:
-            if not isinstance(v, dict):
-                continue
-                
-            unique_id = f"{v.get('camis', '')}_{v.get('inspection_date', '')}"
+    # Check all boroughs
+    boroughs = ['Brooklyn', 'Queens', 'Bronx', 'Manhattan']
+    all_violations = []
+    
+    for borough in boroughs:
+        try:
+            # Pest violation codes: 04L, 04M, 04N, 08A
+            params = {
+                '$where': f"inspection_date > '{week_ago}T00:00:00'",
+                'violation_code': '04L',
+                'boro': borough,
+                '$limit': 25
+            }
             
-            if unique_id not in seen['dohmh']:
-                new_violations.append({
-                    'id': unique_id,
-                    'restaurant': v.get('dba', 'Unknown'),
-                    'address': f"{v.get('building', '')} {v.get('street', '')}, {v.get('boro', '')}".strip(),
-                    'zip': v.get('zipcode', ''),
-                    'phone': v.get('phone', 'N/A'),
-                    'violation_code': v.get('violation_code', ''),
-                    'violation': v.get('violation_description', ''),
-                    'inspection_date': v.get('inspection_date', '')[:10] if v.get('inspection_date') else '',
-                    'grade': v.get('grade', 'N/A')
-                })
-                seen['dohmh'].append(unique_id)
-        
-        seen['dohmh'] = seen['dohmh'][-1000:]
-        save_seen_leads(seen)
-        
-        print(f"Found {len(new_violations)} new DOHMH violations")
-        return new_violations
-        
-    except Exception as e:
-        print(f"Error checking DOHMH: {e}")
-        return []
+            response = requests.get(base_url, params=params, timeout=30)
+            
+            if response.status_code != 200:
+                print(f"DOHMH API ({borough}) returned status {response.status_code}")
+                continue
+            
+            violations = response.json()
+            
+            if not isinstance(violations, list):
+                continue
+            
+            seen = load_seen_leads()
+            
+            for v in violations:
+                if not isinstance(v, dict):
+                    continue
+                    
+                unique_id = f"{v.get('camis', '')}_{v.get('inspection_date', '')}"
+                
+                if unique_id not in seen['dohmh']:
+                    all_violations.append({
+                        'id': unique_id,
+                        'restaurant': v.get('dba', 'Unknown'),
+                        'address': f"{v.get('building', '')} {v.get('street', '')}, {v.get('boro', '')}".strip(),
+                        'zip': v.get('zipcode', ''),
+                        'phone': v.get('phone', 'N/A'),
+                        'violation_code': v.get('violation_code', ''),
+                        'violation': v.get('violation_description', ''),
+                        'inspection_date': v.get('inspection_date', '')[:10] if v.get('inspection_date') else '',
+                        'grade': v.get('grade', 'N/A')
+                    })
+                    seen['dohmh'].append(unique_id)
+            
+            seen['dohmh'] = seen['dohmh'][-2000:]
+            save_seen_leads(seen)
+            
+        except Exception as e:
+            print(f"Error checking DOHMH ({borough}): {e}")
+            continue
+    
+    print(f"Found {len(all_violations)} new DOHMH violations")
+    return all_violations
 
 def check_311_complaints():
     """Check NYC 311 service requests for pest-related complaints"""
@@ -182,63 +187,66 @@ def check_311_complaints():
     
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     
-    try:
-        params = {
-            '$where': f"created_date > '{week_ago}T00:00:00'",
-            'complaint_type': 'Rodent',
-            'borough': 'BROOKLYN',
-            '$limit': 50
-        }
-        
-        response = requests.get(base_url, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"311 API returned status {response.status_code}")
-            return []
-        
-        complaints = response.json()
-        
-        if not isinstance(complaints, list):
-            print(f"311 API returned unexpected format")
-            return []
-        
-        new_complaints = []
-        seen = load_seen_leads()
-        
-        for c in complaints:
-            if not isinstance(c, dict):
-                continue
-                
-            unique_number = c.get('unique_key')
+    # Check all boroughs
+    boroughs = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN']
+    all_complaints = []
+    
+    for borough in boroughs:
+        try:
+            params = {
+                '$where': f"created_date > '{week_ago}T00:00:00'",
+                'complaint_type': 'Rodent',
+                'borough': borough,
+                '$limit': 25
+            }
             
-            if unique_number and str(unique_number) not in seen['311']:
-                address_parts = []
-                if c.get('incident_address'):
-                    address_parts.append(c.get('incident_address'))
-                if c.get('borough'):
-                    address_parts.append(c.get('borough'))
+            response = requests.get(base_url, params=params, timeout=30)
+            
+            if response.status_code != 200:
+                print(f"311 API ({borough}) returned status {response.status_code}")
+                continue
+            
+            complaints = response.json()
+            
+            if not isinstance(complaints, list):
+                continue
+            
+            seen = load_seen_leads()
+            
+            for c in complaints:
+                if not isinstance(c, dict):
+                    continue
+                    
+                unique_number = c.get('unique_key')
                 
-                new_complaints.append({
-                    'id': str(unique_number),
-                    'type': c.get('complaint_type', 'Unknown'),
-                    'descriptor': c.get('descriptor', ''),
-                    'address': ', '.join(address_parts) if address_parts else 'Address not provided',
-                    'zip': c.get('incident_zip', 'N/A'),
-                    'created_date': c.get('created_date', '')[:10] if c.get('created_date') else '',
-                    'status': c.get('status', 'Unknown'),
-                    'agency': c.get('agency', 'N/A')
-                })
-                seen['311'].append(str(unique_number))
-        
-        seen['311'] = seen['311'][-1000:]
-        save_seen_leads(seen)
-        
-        print(f"Found {len(new_complaints)} new 311 complaints")
-        return new_complaints
-        
-    except Exception as e:
-        print(f"Error checking 311: {e}")
-        return []
+                if unique_number and str(unique_number) not in seen['311']:
+                    address_parts = []
+                    if c.get('incident_address'):
+                        address_parts.append(c.get('incident_address'))
+                    if c.get('borough'):
+                        address_parts.append(c.get('borough'))
+                    
+                    all_complaints.append({
+                        'id': str(unique_number),
+                        'type': c.get('complaint_type', 'Unknown'),
+                        'descriptor': c.get('descriptor', ''),
+                        'address': ', '.join(address_parts) if address_parts else 'Address not provided',
+                        'zip': c.get('incident_zip', 'N/A'),
+                        'created_date': c.get('created_date', '')[:10] if c.get('created_date') else '',
+                        'status': c.get('status', 'Unknown'),
+                        'agency': c.get('agency', 'N/A')
+                    })
+                    seen['311'].append(str(unique_number))
+            
+            seen['311'] = seen['311'][-2000:]
+            save_seen_leads(seen)
+            
+        except Exception as e:
+            print(f"Error checking 311 ({borough}): {e}")
+            continue
+    
+    print(f"Found {len(all_complaints)} new 311 complaints")
+    return all_complaints
 
 def check_dob_violations():
     """Check NYC Department of Buildings violations"""
@@ -253,7 +261,10 @@ def check_craigslist():
     print("Checking Craigslist...")
     
     feeds = [
-        'https://newyork.craigslist.org/search/bks?format=rss&query=pest+exterminator',
+        'https://newyork.craigslist.org/search/bks?format=rss&query=pest+exterminator',  # Brooklyn
+        'https://newyork.craigslist.org/search/que?format=rss&query=pest+exterminator',  # Queens
+        'https://newyork.craigslist.org/search/brx?format=rss&query=pest+exterminator',  # Bronx
+        'https://newyork.craigslist.org/search/mnh?format=rss&query=pest+exterminator',  # Manhattan
     ]
     
     new_posts = []
@@ -534,28 +545,4 @@ def main():
     hpd_violations = check_hpd_violations()
     dohmh_violations = check_dohmh_violations()
     complaints_311 = check_311_complaints()
-    dob_violations = check_dob_violations()
-    craigslist_posts = check_craigslist()
-    twitter_posts = check_twitter()
-    reddit_posts = check_reddit()
-    
-    total_leads = (len(hpd_violations) + len(dohmh_violations) + len(complaints_311) + 
-                   len(dob_violations) + len(craigslist_posts) + len(twitter_posts) + len(reddit_posts))
-    
-    print(f"\n📊 Summary: {total_leads} total new leads")
-    print(f"   - HPD: {len(hpd_violations)}")
-    print(f"   - DOHMH: {len(dohmh_violations)}")
-    print(f"   - 311: {len(complaints_311)}")
-    print(f"   - DOB: {len(dob_violations)}")
-    print(f"   - Craigslist: {len(craigslist_posts)}")
-    print(f"   - Twitter: {len(twitter_posts)}")
-    print(f"   - Reddit: {len(reddit_posts)}")
-    
-    if total_leads > 0:
-        send_email_alert(hpd_violations, dohmh_violations, complaints_311, dob_violations, 
-                        craigslist_posts, twitter_posts, reddit_posts)
-    
-    print(f"\n✅ Monitoring complete!\n")
-
-if __name__ == "__main__":
-    main()
+    do
