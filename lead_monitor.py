@@ -386,15 +386,36 @@ def check_reddit():
     return new_posts
 
 def send_email_alert(hpd_violations, dohmh_violations, complaints_311, dob_violations, craigslist_posts, twitter_posts, reddit_posts):
-    """Send email alert with new leads"""
+    """Send email alert with new leads - ALWAYS SENDS FOR DEBUGGING"""
     
     total = len(hpd_violations) + len(dohmh_violations) + len(complaints_311) + len(dob_violations) + len(craigslist_posts) + len(twitter_posts) + len(reddit_posts)
     
-    if total == 0:
-        print("No new leads to report")
-        return
+    # DEBUG MODE: Always send email, even with 0 leads
+    print(f"DEBUG: Preparing email with {total} leads")
     
-    html_content = f"""
+    if total == 0:
+        html_content = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <h1>✅ Monitor Running - No New Leads</h1>
+            <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p><strong>Status:</strong> System checked all sources successfully</p>
+            <p><strong>Result:</strong> No new leads found (all leads already seen before)</p>
+            <hr>
+            <h2>What was checked:</h2>
+            <ul>
+                <li>HPD Violations (Brooklyn, Queens, Bronx, Manhattan)</li>
+                <li>DOHMH Restaurant Violations (All boroughs)</li>
+                <li>NYC 311 Complaints (All boroughs)</li>
+                <li>Craigslist (All boroughs)</li>
+                <li>Reddit (10 subreddits)</li>
+            </ul>
+            <p><em>This means the system is working! You'll get an email when NEW leads appear.</em></p>
+            <p style="color: #666; font-size: 0.9em;">Debug mode active - you'll receive this email every hour even with 0 leads.</p>
+        </body>
+        </html>
+        """
+    else:
     <html>
     <head>
         <style>
@@ -545,4 +566,29 @@ def main():
     hpd_violations = check_hpd_violations()
     dohmh_violations = check_dohmh_violations()
     complaints_311 = check_311_complaints()
-    do
+    dob_violations = check_dob_violations()
+    craigslist_posts = check_craigslist()
+    twitter_posts = check_twitter()
+    reddit_posts = check_reddit()
+    
+    total_leads = (len(hpd_violations) + len(dohmh_violations) + len(complaints_311) + 
+                   len(dob_violations) + len(craigslist_posts) + len(twitter_posts) + len(reddit_posts))
+    
+    print(f"\n📊 Summary: {total_leads} total new leads")
+    print(f"   - HPD: {len(hpd_violations)}")
+    print(f"   - DOHMH: {len(dohmh_violations)}")
+    print(f"   - 311: {len(complaints_311)}")
+    print(f"   - DOB: {len(dob_violations)}")
+    print(f"   - Craigslist: {len(craigslist_posts)}")
+    print(f"   - Twitter: {len(twitter_posts)}")
+    print(f"   - Reddit: {len(reddit_posts)}")
+    
+    # DEBUG MODE: Always send email
+    print("DEBUG: Sending email regardless of lead count...")
+    send_email_alert(hpd_violations, dohmh_violations, complaints_311, dob_violations, 
+                    craigslist_posts, twitter_posts, reddit_posts)
+    
+    print(f"\n✅ Monitoring complete!\n")
+
+if __name__ == "__main__":
+    main()
