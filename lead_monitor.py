@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-NYC Pest Control Lead Monitor - FULL VERSION
-Monitors HPD violations, DOHMH violations, 311 complaints, DOB violations,
-Craigslist posts, Twitter/X posts, and Reddit posts
-Sends email alerts for new leads
+NYC Pest Control Lead Monitor - UPGRADED VERSION
+Green Man Services Inc.
+-------------------------------------------------
+WHAT'S NEW vs OLD VERSION:
+ - DOB violations: FIXED (was broken/skipped)
+ - ECB violations: ADDED (was missing entirely)
+ - DOHMH: now catches ALL 4 pest codes (04L, 04M, 04N, 08A)
+ - Owner Lookup: AUTOMATIC - every HPD/DOB/ECB lead now shows
+   property owner name + mailing address (no more manual ACRIS!)
+ - seen_leads.json: fixed to track all sources
+ - Debug mode: OFF (no more hourly emails when 0 leads)
 """
 
 import requests
@@ -13,49 +20,122 @@ from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import re
 
-# Configuration
-EMAIL_TO = "greenmanservicesinc@gmail.com"
-EMAIL_FROM = os.environ.get('SENDGRID_EMAIL', 'leads@yourleadmonitor.com')
+# ── Configuration ────────────────────────────────────────────
+EMAIL_TO        = "greenmanservicesinc@gmail.com"
+EMAIL_FROM      = os.environ.get('SENDGRID_EMAIL', 'leads@yourleadmonitor.com')
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
+SEEN_FILE       = 'seen_leads.json'
 
-# Keywords to monitor
 KEYWORDS = [
     'pest control', 'exterminator', 'mice', 'rats', 'rodent', 'roaches',
     'ants', 'bed bug', 'bedbug', 'termites', 'violation', 'bees', 'wasps',
     'cockroach', 'infestation', 'vermin', 'mold', 'water damage'
 ]
 
-# File to track what we've already seen
-SEEN_FILE = 'seen_leads.json'
-
+# ── Seen Leads Tracking ──────────────────────────────────────
 def load_seen_leads():
-    """Load previously seen leads from file"""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Make sure all keys exist (backward compat)
+                for key in ['hpd', 'dohmh', 'reddit', '311', 'dob', 'ecb', 'craigslist']:
+                    if key not in data:
+                        data[key] = []
+                return data
         except:
             pass
-    return {'hpd': [], 'dohmh': [], 'reddit': [], '311': [], 'dob': [], 'craigslist': [], 'twitter': []}
+    return {'hpd': [], 'dohmh': [], 'reddit': [], '311': [], 'dob': [], 'ecb': [], 'craigslist': []}
 
 def save_seen_leads(seen):
-    """Save seen leads to file"""
     with open(SEEN_FILE, 'w') as f:
         json.dump(seen, f)
 
+# ── Owner Lookup (Automatic - No API Key Needed) ─────────────
+def lookup_owner(address, borough):
+    """
+    Given a street address + borough, returns the property owner
+    name and mailing address from NYC public records.
+    Uses NYC GeoSearch (free, no key) → BBL → ACRIS/Finance data.
+    """
+    try:
+        # Step 1: Get BBL from GeoSearch
+        geo_url = "https://geosearch.planninglabs.nyc/v2/search"
+        params = {'text': f"{address}, {borough}, NY", 'size': 1}
+        r = requests.get(geo_url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        features = r.json().get('features', [])
+        if not features:
+            return None
+
+        props = features[0].get('properties', {})
+        pad_bbl = props.get('pad_bbl', '')
+        if not pad_bbl or len(pad_bbl) < 10:
+            return None
+
+        # BBL = 10 digits: 1 borough + 5 block + 4 lot
+        boro_code = pad_bbl[0]
+        block     = str(int(pad_bbl[1:6]))   # strip leading zeros for API
+        lot       = str(int(pad_bbl[6:10]))
+
+        # Step 2: Query NYC Finance property data (public, no key)
+        finance_url = "https://data.cityofnewyork.us/resource/yjxr-fw8i.json"
+        params2 = {
+            'borocode': boro_code,
+            'block': block,
+            'lot': lot,
+            '$limit': 1
+        }
+        r2 = requests.get(finance_url, params=params2, timeout=10)
+        if r2.status_code != 200:
+            return None
+
+        records = r2.json()
+        if not records:
+            return None
+
+        rec = records[0]
+        owner_name    = rec.get('ownername', '').strip()
+        mail_address  = rec.get('address', '').strip()
+        mail_city     = rec.get('city', '').strip()
+        mail_state    = rec.get('state', '').strip()
+        mail_zip      = rec.get('zipcode', '').strip()
+
+        if not owner_name:
+            return None
+
+        return {
+            'name':    owner_name,
+            'mailing': f"{mail_address}, {mail_city}, {mail_state} {mail_zip}".strip(', ')
+        }
+
+    except Exception as e:
+        print(f"  Owner lookup error: {e}")
+        return None
+
+def borough_name_to_code(borough_str):
+    """Convert borough name to single digit code for Finance API."""
+    mapping = {
+        'MANHATTAN': '1', 'MN': '1',
+        'BRONX':     '2', 'BX': '2',
+        'BROOKLYN':  '3', 'BK': '3',
+        'QUEENS':    '4', 'QN': '4', 'QU': '4',
+        'STATEN ISLAND': '5', 'SI': '5'
+    }
+    return mapping.get(borough_str.upper().strip(), '')
+
+# ── HPD Violations ────────────────────────────────────────────
 def check_hpd_violations():
-    """Check NYC HPD violations for pest-related issues"""
     print("Checking HPD violations...")
-    
-    base_url = "https://data.cityofnewyork.us/resource/wvxf-dwi5.json"
-    
-    # Get violations from last 7 days
-    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    
-    # Check all boroughs
-    boroughs = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN']
+    base_url  = "https://data.cityofnewyork.us/resource/wvxf-dwi5.json"
+    week_ago  = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    boroughs  = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN']
+    pest_kw   = ['pest', 'roach', 'rodent', 'mice', 'rat', 'bedbug', 'bed bug', 'vermin', 'infestation']
     all_violations = []
-    
+    seen = load_seen_leads()
+
     for borough in boroughs:
         try:
             params = {
@@ -63,134 +143,96 @@ def check_hpd_violations():
                 '$limit': 50,
                 'boro': borough
             }
-            
-            response = requests.get(base_url, params=params, timeout=30)
-            
-            if response.status_code != 200:
-                print(f"HPD API ({borough}) returned status {response.status_code}")
+            r = requests.get(base_url, params=params, timeout=30)
+            if r.status_code != 200:
+                print(f"  HPD ({borough}): status {r.status_code}")
                 continue
-            
-            violations = response.json()
-            
-            if not isinstance(violations, list):
-                continue
-            
-            seen = load_seen_leads()
-            
-            # Filter for pest-related violations
-            pest_keywords = ['pest', 'roach', 'rodent', 'mice', 'rat', 'bedbug', 'bed bug', 'vermin', 'infestation']
-            
-            for v in violations:
+
+            for v in r.json():
                 if not isinstance(v, dict):
                     continue
-                    
-                description = str(v.get('novdescription', '')).lower()
-                
-                # Check if pest-related
-                if not any(keyword in description for keyword in pest_keywords):
+                desc = str(v.get('novdescription', '')).lower()
+                if not any(k in desc for k in pest_kw):
                     continue
-                
-                violation_id = v.get('violationid')
-                if violation_id and str(violation_id) not in seen['hpd']:
+                vid = str(v.get('violationid', ''))
+                if vid and vid not in seen['hpd']:
+                    addr_str = f"{v.get('housenumber', '')} {v.get('streetname', '')}".strip()
+                    owner = lookup_owner(addr_str, borough)
                     all_violations.append({
-                        'id': str(violation_id),
-                        'address': f"{v.get('housenumber', '')} {v.get('streetname', '')}, {v.get('boro', '')}".strip(),
-                        'apartment': v.get('apartment', 'N/A'),
-                        'zip': v.get('zip', ''),
-                        'class': v.get('class', ''),
-                        'description': v.get('novdescription', ''),
-                        'inspection_date': v.get('inspectiondate', '')[:10] if v.get('inspectiondate') else '',
-                        'status': v.get('currentstatus', '')
+                        'id':            vid,
+                        'address':       f"{addr_str}, {borough}",
+                        'apartment':     v.get('apartment', 'N/A'),
+                        'zip':           v.get('zip', ''),
+                        'class':         v.get('class', ''),
+                        'description':   v.get('novdescription', ''),
+                        'inspection_date': (v.get('inspectiondate', '')[:10]),
+                        'owner':         owner
                     })
-                    seen['hpd'].append(str(violation_id))
-            
-            seen['hpd'] = seen['hpd'][-2000:]
-            save_seen_leads(seen)
-            
+                    seen['hpd'].append(vid)
         except Exception as e:
-            print(f"Error checking HPD ({borough}): {e}")
-            continue
-    
-    print(f"Found {len(all_violations)} new HPD violations")
+            print(f"  HPD ({borough}) error: {e}")
+
+    seen['hpd'] = seen['hpd'][-2000:]
+    save_seen_leads(seen)
+    print(f"  Found {len(all_violations)} new HPD violations")
     return all_violations
 
+# ── DOHMH Restaurant Violations (ALL 4 pest codes) ───────────
 def check_dohmh_violations():
-    """Check DOHMH restaurant violations"""
-    print("Checking DOHMH restaurant violations...")
-    
-    base_url = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
-    
-    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    
-    # Check all boroughs
-    boroughs = ['Brooklyn', 'Queens', 'Bronx', 'Manhattan']
+    print("Checking DOHMH violations...")
+    base_url  = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+    week_ago  = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    boroughs  = ['Brooklyn', 'Queens', 'Bronx', 'Manhattan']
+    # 04L=mice, 04M=rats, 04N=roaches, 08A=not vermin-proof
+    pest_codes = ['04L', '04M', '04N', '08A']
     all_violations = []
-    
+    seen = load_seen_leads()
+
     for borough in boroughs:
-        try:
-            # Pest violation codes: 04L, 04M, 04N, 08A
-            params = {
-                '$where': f"inspection_date > '{week_ago}T00:00:00'",
-                'violation_code': '04L',
-                'boro': borough,
-                '$limit': 25
-            }
-            
-            response = requests.get(base_url, params=params, timeout=30)
-            
-            if response.status_code != 200:
-                print(f"DOHMH API ({borough}) returned status {response.status_code}")
-                continue
-            
-            violations = response.json()
-            
-            if not isinstance(violations, list):
-                continue
-            
-            seen = load_seen_leads()
-            
-            for v in violations:
-                if not isinstance(v, dict):
+        for code in pest_codes:
+            try:
+                params = {
+                    '$where': f"inspection_date > '{week_ago}T00:00:00'",
+                    'violation_code': code,
+                    'boro': borough,
+                    '$limit': 25
+                }
+                r = requests.get(base_url, params=params, timeout=30)
+                if r.status_code != 200:
                     continue
-                    
-                unique_id = f"{v.get('camis', '')}_{v.get('inspection_date', '')}"
-                
-                if unique_id not in seen['dohmh']:
-                    all_violations.append({
-                        'id': unique_id,
-                        'restaurant': v.get('dba', 'Unknown'),
-                        'address': f"{v.get('building', '')} {v.get('street', '')}, {v.get('boro', '')}".strip(),
-                        'zip': v.get('zipcode', ''),
-                        'phone': v.get('phone', 'N/A'),
-                        'violation_code': v.get('violation_code', ''),
-                        'violation': v.get('violation_description', ''),
-                        'inspection_date': v.get('inspection_date', '')[:10] if v.get('inspection_date') else '',
-                        'grade': v.get('grade', 'N/A')
-                    })
-                    seen['dohmh'].append(unique_id)
-            
-            seen['dohmh'] = seen['dohmh'][-2000:]
-            save_seen_leads(seen)
-            
-        except Exception as e:
-            print(f"Error checking DOHMH ({borough}): {e}")
-            continue
-    
-    print(f"Found {len(all_violations)} new DOHMH violations")
+                for v in r.json():
+                    if not isinstance(v, dict):
+                        continue
+                    uid = f"{v.get('camis', '')}_{v.get('inspection_date', '')}_{code}"
+                    if uid not in seen['dohmh']:
+                        all_violations.append({
+                            'id':         uid,
+                            'restaurant': v.get('dba', 'Unknown'),
+                            'address':    f"{v.get('building', '')} {v.get('street', '')}, {borough}".strip(),
+                            'zip':        v.get('zipcode', ''),
+                            'phone':      v.get('phone', 'N/A'),
+                            'violation_code': code,
+                            'violation':  v.get('violation_description', ''),
+                            'inspection_date': (v.get('inspection_date', '')[:10])
+                        })
+                        seen['dohmh'].append(uid)
+            except Exception as e:
+                print(f"  DOHMH ({borough}/{code}) error: {e}")
+
+    seen['dohmh'] = seen['dohmh'][-2000:]
+    save_seen_leads(seen)
+    print(f"  Found {len(all_violations)} new DOHMH violations")
     return all_violations
 
+# ── 311 Complaints ────────────────────────────────────────────
 def check_311_complaints():
-    """Check NYC 311 service requests for pest-related complaints"""
-    print("Checking NYC 311 complaints...")
-    
+    print("Checking 311 complaints...")
     base_url = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
-    
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    
-    # Check all boroughs
     boroughs = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN']
     all_complaints = []
-    
+    seen = load_seen_leads()
+
     for borough in boroughs:
         try:
             params = {
@@ -199,397 +241,407 @@ def check_311_complaints():
                 'borough': borough,
                 '$limit': 25
             }
-            
-            response = requests.get(base_url, params=params, timeout=30)
-            
-            if response.status_code != 200:
-                print(f"311 API ({borough}) returned status {response.status_code}")
+            r = requests.get(base_url, params=params, timeout=30)
+            if r.status_code != 200:
                 continue
-            
-            complaints = response.json()
-            
-            if not isinstance(complaints, list):
-                continue
-            
-            seen = load_seen_leads()
-            
-            for c in complaints:
+            for c in r.json():
                 if not isinstance(c, dict):
                     continue
-                    
-                unique_number = c.get('unique_key')
-                
-                if unique_number and str(unique_number) not in seen['311']:
-                    address_parts = []
-                    if c.get('incident_address'):
-                        address_parts.append(c.get('incident_address'))
-                    if c.get('borough'):
-                        address_parts.append(c.get('borough'))
-                    
+                uid = str(c.get('unique_key', ''))
+                if uid and uid not in seen['311']:
+                    addr = c.get('incident_address', 'Address not provided')
                     all_complaints.append({
-                        'id': str(unique_number),
-                        'type': c.get('complaint_type', 'Unknown'),
+                        'id':         uid,
+                        'type':       c.get('complaint_type', 'Unknown'),
                         'descriptor': c.get('descriptor', ''),
-                        'address': ', '.join(address_parts) if address_parts else 'Address not provided',
-                        'zip': c.get('incident_zip', 'N/A'),
-                        'created_date': c.get('created_date', '')[:10] if c.get('created_date') else '',
-                        'status': c.get('status', 'Unknown'),
-                        'agency': c.get('agency', 'N/A')
+                        'address':    f"{addr}, {borough}",
+                        'zip':        c.get('incident_zip', 'N/A'),
+                        'created_date': (c.get('created_date', '')[:10]),
+                        'status':     c.get('status', 'Unknown')
                     })
-                    seen['311'].append(str(unique_number))
-            
-            seen['311'] = seen['311'][-2000:]
-            save_seen_leads(seen)
-            
+                    seen['311'].append(uid)
         except Exception as e:
-            print(f"Error checking 311 ({borough}): {e}")
-            continue
-    
-    print(f"Found {len(all_complaints)} new 311 complaints")
+            print(f"  311 ({borough}) error: {e}")
+
+    seen['311'] = seen['311'][-2000:]
+    save_seen_leads(seen)
+    print(f"  Found {len(all_complaints)} new 311 complaints")
     return all_complaints
 
+# ── DOB Violations (FIXED) ────────────────────────────────────
 def check_dob_violations():
-    """Check NYC Department of Buildings violations"""
     print("Checking DOB violations...")
-    
-    # DOB API is less reliable, skip for now
-    print("DOB: Skipping (API currently unavailable)")
-    return []
+    # Correct endpoint: DOB violations dataset
+    base_url = "https://data.cityofnewyork.us/resource/3h2n-5cm9.json"
+    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    pest_kw  = ['pest', 'vermin', 'rodent', 'rat', 'mice', 'roach', 'infestation',
+                'unsanitary', 'filth', 'garbage']
+    all_violations = []
+    seen = load_seen_leads()
 
+    try:
+        params = {
+            '$where': f"issue_date > '{week_ago}T00:00:00'",
+            '$limit': 100
+        }
+        r = requests.get(base_url, params=params, timeout=30)
+        if r.status_code != 200:
+            print(f"  DOB: status {r.status_code}")
+            return []
+
+        for v in r.json():
+            if not isinstance(v, dict):
+                continue
+            desc = str(v.get('description', '') or v.get('violation_type', '')).lower()
+            if not any(k in desc for k in pest_kw):
+                continue
+            vid = str(v.get('isn_dob_bis_viol', v.get('number', '')))
+            if vid and vid not in seen['dob']:
+                addr_str = f"{v.get('house_number', '')} {v.get('street', '')}".strip()
+                borough  = str(v.get('borough', '')).upper()
+                owner    = lookup_owner(addr_str, borough) if addr_str else None
+                all_violations.append({
+                    'id':          vid,
+                    'address':     f"{addr_str}, {borough}",
+                    'description': v.get('description', v.get('violation_type', 'N/A')),
+                    'issue_date':  str(v.get('issue_date', ''))[:10],
+                    'disposition': v.get('disposition_date', 'Open'),
+                    'owner':       owner
+                })
+                seen['dob'].append(vid)
+    except Exception as e:
+        print(f"  DOB error: {e}")
+
+    seen['dob'] = seen['dob'][-2000:]
+    save_seen_leads(seen)
+    print(f"  Found {len(all_violations)} new DOB violations")
+    return all_violations
+
+# ── ECB Violations (NEW) ──────────────────────────────────────
+def check_ecb_violations():
+    """
+    ECB = Environmental Control Board violations.
+    These are fines issued for building code violations including
+    pest/sanitary conditions. Hot leads — owner already got fined.
+    """
+    print("Checking ECB violations...")
+    base_url = "https://data.cityofnewyork.us/resource/6bgk-3dad.json"
+    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    pest_kw  = ['pest', 'vermin', 'rodent', 'rat', 'mice', 'roach',
+                'infestation', 'unsanitary', 'filth', 'extermination']
+    all_violations = []
+    seen = load_seen_leads()
+
+    try:
+        params = {
+            '$where': f"issue_date > '{week_ago}T00:00:00'",
+            '$limit': 100
+        }
+        r = requests.get(base_url, params=params, timeout=30)
+        if r.status_code != 200:
+            print(f"  ECB: status {r.status_code}")
+            return []
+
+        for v in r.json():
+            if not isinstance(v, dict):
+                continue
+            desc = str(v.get('violation_description', '') or v.get('section_law_description', '')).lower()
+            if not any(k in desc for k in pest_kw):
+                continue
+            vid = str(v.get('ecb_violation_number', v.get('isn_dob_bis_viol', '')))
+            if vid and vid not in seen['ecb']:
+                addr_str = f"{v.get('house_number', '')} {v.get('street_name', '')}".strip()
+                borough  = str(v.get('borough', '')).upper()
+                owner    = lookup_owner(addr_str, borough) if addr_str else None
+                all_violations.append({
+                    'id':          vid,
+                    'address':     f"{addr_str}, {borough}",
+                    'description': v.get('violation_description', v.get('section_law_description', 'N/A')),
+                    'issue_date':  str(v.get('issue_date', ''))[:10],
+                    'fine':        v.get('penalty_imposed', 'N/A'),
+                    'status':      v.get('ecb_violation_status', 'N/A'),
+                    'owner':       owner
+                })
+                seen['ecb'].append(vid)
+    except Exception as e:
+        print(f"  ECB error: {e}")
+
+    seen['ecb'] = seen['ecb'][-2000:]
+    save_seen_leads(seen)
+    print(f"  Found {len(all_violations)} new ECB violations")
+    return all_violations
+
+# ── Craigslist ────────────────────────────────────────────────
 def check_craigslist():
-    """Check Craigslist RSS feeds for pest-related posts"""
     print("Checking Craigslist...")
-    
     feeds = [
-        'https://newyork.craigslist.org/search/bks?format=rss&query=pest+exterminator',  # Brooklyn
-        'https://newyork.craigslist.org/search/que?format=rss&query=pest+exterminator',  # Queens
-        'https://newyork.craigslist.org/search/brx?format=rss&query=pest+exterminator',  # Bronx
-        'https://newyork.craigslist.org/search/mnh?format=rss&query=pest+exterminator',  # Manhattan
+        'https://newyork.craigslist.org/search/bks?format=rss&query=pest+exterminator',
+        'https://newyork.craigslist.org/search/que?format=rss&query=pest+exterminator',
+        'https://newyork.craigslist.org/search/brx?format=rss&query=pest+exterminator',
+        'https://newyork.craigslist.org/search/mnh?format=rss&query=pest+exterminator',
     ]
-    
     new_posts = []
     seen = load_seen_leads()
-    
+
     for feed_url in feeds:
         try:
-            response = requests.get(feed_url, timeout=10)
-            if response.status_code != 200:
+            r = requests.get(feed_url, timeout=10)
+            if r.status_code != 200:
                 continue
-            
-            root = ET.fromstring(response.content)
-            
-            for item in root.findall('.//{http://purl.org/rss/1.0/}item')[:5]:  # Limit to 5
+            root = ET.fromstring(r.content)
+            for item in root.findall('.//{http://purl.org/rss/1.0/}item')[:5]:
                 title_elem = item.find('{http://purl.org/rss/1.0/}title')
-                link_elem = item.find('{http://purl.org/rss/1.0/}link')
-                
+                link_elem  = item.find('{http://purl.org/rss/1.0/}link')
                 if title_elem is None or link_elem is None:
                     continue
-                
-                title = title_elem.text or ''
                 link = link_elem.text or ''
-                
-                post_id_match = re.search(r'/(\d+)\.html', link)
-                if not post_id_match:
+                m = re.search(r'/(\d+)\.html', link)
+                if not m:
                     continue
-                    
-                post_id = post_id_match.group(1)
-                
-                if post_id in seen['craigslist']:
-                    continue
-                
-                new_posts.append({
-                    'id': post_id,
-                    'title': title,
-                    'description': '',
-                    'link': link,
-                    'posted': 'Recent'
-                })
-                seen['craigslist'].append(post_id)
-        
+                pid = m.group(1)
+                if pid not in seen['craigslist']:
+                    new_posts.append({'id': pid, 'title': title_elem.text or '', 'link': link})
+                    seen['craigslist'].append(pid)
         except Exception as e:
-            print(f"Error checking Craigslist: {e}")
-            continue
-    
+            print(f"  Craigslist error: {e}")
+
     seen['craigslist'] = seen['craigslist'][-1000:]
     save_seen_leads(seen)
-    
-    print(f"Found {len(new_posts)} new Craigslist posts")
+    print(f"  Found {len(new_posts)} new Craigslist posts")
     return new_posts
 
-def check_twitter():
-    """Check Twitter/X via Nitter RSS"""
-    print("Checking Twitter/X...")
-    
-    # Twitter/Nitter often blocked, skip for now
-    print("Twitter: Skipping (Nitter currently unavailable)")
-    return []
-
+# ── Reddit ────────────────────────────────────────────────────
 def check_reddit():
-    """Check Reddit for pest control posts"""
     print("Checking Reddit...")
-    
     subreddits = [
         'AskNYC', 'nyc', 'Brooklyn', 'Queens', 'Bronx',
-        'Bedbugs', 'Landlord',
-        'Bushwick', 'williamsburg', 'astoria'
+        'Bedbugs', 'Landlord', 'Bushwick', 'williamsburg', 'astoria'
     ]
-    
     new_posts = []
     seen = load_seen_leads()
-    
-    headers = {'User-Agent': 'LeadMonitor/1.0'}
-    
-    for subreddit in subreddits:
+    headers = {'User-Agent': 'LeadMonitor/2.0'}
+    nyc_kw  = ['nyc', 'new york', 'brooklyn', 'queens', 'bronx', 'manhattan']
+
+    for sub in subreddits:
         try:
-            url = f"https://www.reddit.com/r/{subreddit}/new.json?limit=10"
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            if response.status_code != 200:
+            r = requests.get(f"https://www.reddit.com/r/{sub}/new.json?limit=10",
+                             headers=headers, timeout=10)
+            if r.status_code != 200:
                 continue
-                
-            data = response.json()
-            posts = data.get('data', {}).get('children', [])
-            
-            for post in posts:
-                post_data = post.get('data', {})
-                post_id = post_data.get('id')
-                title = post_data.get('title', '').lower()
-                selftext = post_data.get('selftext', '').lower()
-                
-                text_to_check = title + ' ' + selftext
-                if not any(keyword.lower() in text_to_check for keyword in KEYWORDS):
+            for post in r.json().get('data', {}).get('children', []):
+                d    = post.get('data', {})
+                pid  = d.get('id')
+                text = (d.get('title', '') + ' ' + d.get('selftext', '')).lower()
+                if not any(k.lower() in text for k in KEYWORDS):
                     continue
-                
-                if post_id and post_id not in seen['reddit']:
-                    nyc_keywords = ['nyc', 'new york', 'brooklyn', 'queens', 'bronx', 'manhattan']
-                    if subreddit.lower() in ['asknyc', 'nyc', 'brooklyn', 'queens', 'bronx'] or \
-                       any(kw in text_to_check for kw in nyc_keywords):
-                        
+                if pid and pid not in seen['reddit']:
+                    if sub.lower() in ['asknyc', 'nyc', 'brooklyn', 'queens', 'bronx'] or \
+                       any(k in text for k in nyc_kw):
                         new_posts.append({
-                            'id': post_id,
-                            'subreddit': subreddit,
-                            'title': post_data.get('title', ''),
-                            'text': post_data.get('selftext', '')[:200],
-                            'url': f"https://reddit.com{post_data.get('permalink', '')}",
-                            'created': datetime.fromtimestamp(post_data.get('created_utc', 0)).strftime('%Y-%m-%d %H:%M:%S')
+                            'id':        pid,
+                            'subreddit': sub,
+                            'title':     d.get('title', ''),
+                            'text':      d.get('selftext', '')[:200],
+                            'url':       f"https://reddit.com{d.get('permalink', '')}",
+                            'created':   datetime.fromtimestamp(
+                                            d.get('created_utc', 0)
+                                         ).strftime('%Y-%m-%d %H:%M')
                         })
-                        seen['reddit'].append(post_id)
-            
+                        seen['reddit'].append(pid)
         except Exception as e:
-            print(f"Error checking r/{subreddit}: {e}")
-            continue
-    
+            print(f"  Reddit r/{sub} error: {e}")
+
     seen['reddit'] = seen['reddit'][-1000:]
     save_seen_leads(seen)
-    
-    print(f"Found {len(new_posts)} new Reddit posts")
+    print(f"  Found {len(new_posts)} new Reddit posts")
     return new_posts
 
-def send_email_alert(hpd_violations, dohmh_violations, complaints_311, dob_violations, craigslist_posts, twitter_posts, reddit_posts):
-    """Send email alert with new leads - ALWAYS SENDS FOR DEBUGGING"""
-    
-    total = len(hpd_violations) + len(dohmh_violations) + len(complaints_311) + len(dob_violations) + len(craigslist_posts) + len(twitter_posts) + len(reddit_posts)
-    
-    # DEBUG MODE: Always send email, even with 0 leads
-    print(f"DEBUG: Preparing email with {total} leads")
-    
-    if total == 0:
-        html_content = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif;">
-            <h1>✅ Monitor Running - No New Leads</h1>
-            <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <p><strong>Status:</strong> System checked all sources successfully</p>
-            <p><strong>Result:</strong> No new leads found (all leads already seen before)</p>
-            <hr>
-            <h2>What was checked:</h2>
-            <ul>
-                <li>HPD Violations (Brooklyn, Queens, Bronx, Manhattan)</li>
-                <li>DOHMH Restaurant Violations (All boroughs)</li>
-                <li>NYC 311 Complaints (All boroughs)</li>
-                <li>Craigslist (All boroughs)</li>
-                <li>Reddit (10 subreddits)</li>
-            </ul>
-            <p><em>This means the system is working! You'll get an email when NEW leads appear.</em></p>
-            <p style="color: #666; font-size: 0.9em;">Debug mode active - you'll receive this email every hour even with 0 leads.</p>
-        </body>
-        </html>
-        """
+# ── Owner HTML Block ──────────────────────────────────────────
+def owner_html(owner):
+    if owner:
+        return f"""
+        <div style="margin-top:8px; padding:8px; background:#e8f4e8; border-radius:4px; border-left:3px solid #28a745;">
+            <span style="font-weight:bold; color:#28a745;">👤 Owner Found:</span>
+            <strong>{owner['name']}</strong><br>
+            📬 {owner['mailing']}
+        </div>"""
     else:
-        html_content = f"""
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, sans-serif; }}
-            .section {{ margin: 20px 0; padding: 15px; border-left: 4px solid #0066ff; background: #f5f5f5; }}
-            .lead {{ margin: 10px 0; padding: 10px; background: white; border-radius: 5px; }}
-            .emergency {{ border-left: 4px solid #ff0000; }}
-            h2 {{ color: #0066ff; }}
-            .label {{ font-weight: bold; color: #333; }}
-            .address {{ font-size: 1.1em; color: #0066ff; }}
-        </style>
-    </head>
-    <body>
-        <h1>🎯 {total} New Leads - NYC Pest Control</h1>
-        <p>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    """
-    
-        # HPD Violations
-        if hpd_violations:
-            html_content += f"""
-        <div class="section">
-            <h2>🏛️ HPD Housing Violations ({len(hpd_violations)} new)</h2>
-        """
-            for v in hpd_violations[:10]:  # Limit to 10
-                emergency_class = 'emergency' if v.get('class') == 'C' else ''
-                html_content += f"""
-            <div class="lead {emergency_class}">
-                <div class="address">📍 {v.get('address', 'N/A')}</div>
-                <div><span class="label">Apartment:</span> {v.get('apartment', 'N/A')}</div>
-                <div><span class="label">Class:</span> {v.get('class', 'N/A')} {'⚠️ EMERGENCY' if v.get('class') == 'C' else ''}</div>
-                <div><span class="label">Description:</span> {v.get('description', 'N/A')[:150]}</div>
-                <div><span class="label">Inspected:</span> {v.get('inspection_date', 'N/A')}</div>
-                <div style="margin-top: 10px;">
-                    <a href="https://a836-acris.nyc.gov/DS/DocumentSearch/Index" style="background: #0066ff; color: white; padding: 8px 15px; text-decoration: none; border-radius: 5px;">Find Owner →</a>
-                </div>
-            </div>
-            """
-            html_content += "</div>"
-    
-        # DOHMH Violations
-        if dohmh_violations:
-            html_content += f"""
-        <div class="section">
-            <h2>🍽️ DOHMH Restaurant Violations ({len(dohmh_violations)} new)</h2>
-        """
-            for v in dohmh_violations[:10]:
-                html_content += f"""
-            <div class="lead">
-                <div class="address">📍 {v.get('restaurant', 'N/A')}</div>
-                <div><span class="label">Address:</span> {v.get('address', 'N/A')}</div>
-                <div><span class="label">Phone:</span> {v.get('phone', 'N/A')}</div>
-                <div><span class="label">Violation:</span> [{v.get('violation_code', '')}] {v.get('violation', 'N/A')[:150]}</div>
-            </div>
-            """
-            html_content += "</div>"
-    
-        # 311 Complaints
-        if complaints_311:
-            html_content += f"""
-        <div class="section">
-            <h2>📞 NYC 311 Complaints ({len(complaints_311)} new)</h2>
-        """
-            for c in complaints_311[:10]:
-                html_content += f"""
-            <div class="lead">
-                <div class="address">📍 {c.get('address', 'N/A')}</div>
-                <div><span class="label">Type:</span> {c.get('type', 'N/A')}</div>
-                <div><span class="label">Descriptor:</span> {c.get('descriptor', 'N/A')}</div>
-                <div><span class="label">Status:</span> {c.get('status', 'N/A')}</div>
-            </div>
-            """
-            html_content += "</div>"
-    
-        # Craigslist
-        if craigslist_posts:
-            html_content += f"""
-        <div class="section">
-            <h2>📋 Craigslist Posts ({len(craigslist_posts)} new)</h2>
-        """
-            for p in craigslist_posts[:10]:
-                html_content += f"""
-            <div class="lead">
-                <div class="address">{p.get('title', 'N/A')}</div>
-                <div><a href="{p.get('link', '#')}" style="background: #6633cc; color: white; padding: 8px 15px; text-decoration: none; border-radius: 5px;">View Post →</a></div>
-            </div>
-            """
-            html_content += "</div>"
-    
-        # Reddit
-        if reddit_posts:
-            html_content += f"""
-        <div class="section">
-            <h2>💬 Reddit Posts ({len(reddit_posts)} new)</h2>
-        """
-            for p in reddit_posts[:10]:
-                html_content += f"""
-            <div class="lead">
-                <div class="address">r/{p.get('subreddit', 'N/A')}: {p.get('title', 'N/A')}</div>
-                <div><a href="{p.get('url', '#')}" style="background: #ff4500; color: white; padding: 8px 15px; text-decoration: none; border-radius: 5px;">View Post →</a></div>
-            </div>
-            """
-            html_content += "</div>"
-    
-        html_content += """
-    <hr>
-    <p style="color: #666; font-size: 0.9em;">
-        Automated NYC Pest Control Lead Monitor<br>
-        Respond quickly for best conversion rates!
-    </p>
-    </body>
-    </html>
-    """
-    
-    try:
-        url = "https://api.sendgrid.com/v3/mail/send"
-        
-        payload = {
-            "personalizations": [{
-                "to": [{"email": EMAIL_TO}],
-                "subject": f"🎯 {total} New Leads - NYC Pest Control Monitor"
-            }],
-            "from": {"email": EMAIL_FROM},
-            "content": [{"type": "text/html", "value": html_content}]
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {SENDGRID_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 202:
-            print("✅ Email sent successfully!")
-        else:
-            print(f"❌ Email failed: {response.status_code} - {response.text}")
-            
-    except Exception as e:
-        print(f"Error sending email: {e}")
+        return f"""
+        <div style="margin-top:8px;">
+            <a href="https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+               style="background:#0066ff;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">
+               🔍 Find Owner in ACRIS →</a>
+        </div>"""
 
+# ── Send Email ────────────────────────────────────────────────
+def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
+    total = len(hpd) + len(dohmh) + len(c311) + len(dob) + len(ecb) + len(craigslist) + len(reddit)
+
+    if total == 0:
+        print("No new leads found — skipping email.")
+        return
+
+    html = f"""
+    <html><head><style>
+        body {{ font-family: Arial, sans-serif; max-width: 800px; margin: auto; }}
+        .section {{ margin:20px 0; padding:15px; border-left:4px solid #0066ff; background:#f5f5f5; }}
+        .lead {{ margin:10px 0; padding:12px; background:white; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,.1); }}
+        .emergency {{ border-left:4px solid #ff0000; }}
+        h2 {{ color:#0066ff; margin:0 0 10px; }}
+        .label {{ font-weight:bold; color:#333; }}
+        .address {{ font-size:1.1em; color:#0066ff; font-weight:bold; }}
+    </style></head><body>
+    <h1>🎯 {total} New Leads — NYC Pest Control</h1>
+    <p style="color:#666;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Green Man Services Inc.</p>
+    """
+
+    # HPD
+    if hpd:
+        html += f'<div class="section"><h2>🏛️ HPD Housing Violations ({len(hpd)} new)</h2>'
+        for v in hpd[:15]:
+            ec = 'emergency' if v.get('class') == 'C' else ''
+            html += f"""
+            <div class="lead {ec}">
+                <div class="address">📍 {v['address']}</div>
+                <div><span class="label">Apartment:</span> {v.get('apartment','N/A')}</div>
+                <div><span class="label">Class:</span> {v.get('class','N/A')} {'⚠️ EMERGENCY' if v.get('class')=='C' else ''}</div>
+                <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
+                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
+                {owner_html(v.get('owner'))}
+            </div>"""
+        html += '</div>'
+
+    # DOB
+    if dob:
+        html += f'<div class="section"><h2>🏗️ DOB Building Violations ({len(dob)} new)</h2>'
+        for v in dob[:15]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v['address']}</div>
+                <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
+                <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
+                {owner_html(v.get('owner'))}
+            </div>"""
+        html += '</div>'
+
+    # ECB
+    if ecb:
+        html += f'<div class="section"><h2>⚖️ ECB Violations ({len(ecb)} new)</h2>'
+        for v in ecb[:15]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v['address']}</div>
+                <div><span class="label">Violation:</span> {v.get('description','')[:180]}</div>
+                <div><span class="label">Fine:</span> ${v.get('fine','N/A')} &nbsp;|&nbsp; <span class="label">Status:</span> {v.get('status','N/A')}</div>
+                <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
+                {owner_html(v.get('owner'))}
+            </div>"""
+        html += '</div>'
+
+    # DOHMH
+    if dohmh:
+        code_labels = {'04L':'🐭 Mice','04M':'🐀 Rats','04N':'🪳 Roaches','08A':'🚪 Not Vermin-Proof'}
+        html += f'<div class="section"><h2>🍽️ DOHMH Restaurant Violations ({len(dohmh)} new)</h2>'
+        for v in dohmh[:15]:
+            label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v.get('restaurant','N/A')}</div>
+                <div><span class="label">Address:</span> {v['address']}</div>
+                <div><span class="label">Phone:</span> {v.get('phone','N/A')}</div>
+                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:150]}</div>
+                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
+            </div>"""
+        html += '</div>'
+
+    # 311
+    if c311:
+        html += f'<div class="section"><h2>📞 311 Complaints ({len(c311)} new)</h2>'
+        for c in c311[:15]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {c['address']}</div>
+                <div><span class="label">Type:</span> {c.get('type','N/A')} — {c.get('descriptor','')}</div>
+                <div><span class="label">Status:</span> {c.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {c.get('created_date','N/A')}</div>
+            </div>"""
+        html += '</div>'
+
+    # Craigslist
+    if craigslist:
+        html += f'<div class="section"><h2>📋 Craigslist ({len(craigslist)} new)</h2>'
+        for p in craigslist[:10]:
+            html += f"""
+            <div class="lead">
+                <div class="address">{p.get('title','N/A')}</div>
+                <a href="{p.get('link','#')}" style="background:#6633cc;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">View Post →</a>
+            </div>"""
+        html += '</div>'
+
+    # Reddit
+    if reddit:
+        html += f'<div class="section"><h2>💬 Reddit ({len(reddit)} new)</h2>'
+        for p in reddit[:10]:
+            html += f"""
+            <div class="lead">
+                <div class="address">r/{p.get('subreddit','')}: {p.get('title','N/A')}</div>
+                <div style="color:#666;font-size:.9em;">{p.get('text','')[:150]}</div>
+                <a href="{p.get('url','#')}" style="background:#ff4500;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">View Post →</a>
+            </div>"""
+        html += '</div>'
+
+    html += """
+    <hr>
+    <p style="color:#666;font-size:.85em;">Green Man Services Inc. | Automated Lead Monitor v2.0<br>
+    Respond fast — speed wins jobs!</p>
+    </body></html>"""
+
+    # Send via SendGrid
+    try:
+        r = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json={
+                "personalizations": [{"to": [{"email": EMAIL_TO}],
+                                       "subject": f"🎯 {total} New Leads — NYC Pest Control"}],
+                "from":    {"email": EMAIL_FROM},
+                "content": [{"type": "text/html", "value": html}]
+            },
+            headers={"Authorization": f"Bearer {SENDGRID_API_KEY}",
+                     "Content-Type": "application/json"},
+            timeout=10
+        )
+        if r.status_code == 202:
+            print("✅ Email sent!")
+        else:
+            print(f"❌ Email failed: {r.status_code} — {r.text}")
+    except Exception as e:
+        print(f"Email error: {e}")
+
+# ── Main ──────────────────────────────────────────────────────
 def main():
-    """Main monitoring function"""
     print(f"\n{'='*60}")
-    print(f"NYC Pest Control Lead Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"NYC Lead Monitor v2.0 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")
-    
-    # Check all sources
-    hpd_violations = check_hpd_violations()
-    dohmh_violations = check_dohmh_violations()
-    complaints_311 = check_311_complaints()
-    dob_violations = check_dob_violations()
-    craigslist_posts = check_craigslist()
-    twitter_posts = check_twitter()
-    reddit_posts = check_reddit()
-    
-    total_leads = (len(hpd_violations) + len(dohmh_violations) + len(complaints_311) + 
-                   len(dob_violations) + len(craigslist_posts) + len(twitter_posts) + len(reddit_posts))
-    
-    print(f"\n📊 Summary: {total_leads} total new leads")
-    print(f"   - HPD: {len(hpd_violations)}")
-    print(f"   - DOHMH: {len(dohmh_violations)}")
-    print(f"   - 311: {len(complaints_311)}")
-    print(f"   - DOB: {len(dob_violations)}")
-    print(f"   - Craigslist: {len(craigslist_posts)}")
-    print(f"   - Twitter: {len(twitter_posts)}")
-    print(f"   - Reddit: {len(reddit_posts)}")
-    
-    # DEBUG MODE: Always send email
-    print("DEBUG: Sending email regardless of lead count...")
-    send_email_alert(hpd_violations, dohmh_violations, complaints_311, dob_violations, 
-                    craigslist_posts, twitter_posts, reddit_posts)
-    
-    print(f"\n✅ Monitoring complete!\n")
+
+    hpd       = check_hpd_violations()
+    dohmh     = check_dohmh_violations()
+    c311      = check_311_complaints()
+    dob       = check_dob_violations()
+    ecb       = check_ecb_violations()
+    craigslist = check_craigslist()
+    reddit    = check_reddit()
+
+    total = len(hpd)+len(dohmh)+len(c311)+len(dob)+len(ecb)+len(craigslist)+len(reddit)
+    print(f"\n📊 Summary: {total} total new leads")
+    print(f"   HPD:        {len(hpd)}")
+    print(f"   DOB:        {len(dob)}  ← was broken, now fixed")
+    print(f"   ECB:        {len(ecb)}  ← new source")
+    print(f"   DOHMH:      {len(dohmh)}  ← now all 4 pest codes")
+    print(f"   311:        {len(c311)}")
+    print(f"   Craigslist: {len(craigslist)}")
+    print(f"   Reddit:     {len(reddit)}")
+
+    send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit)
+    print(f"\n✅ Done!\n")
 
 if __name__ == "__main__":
     main()
