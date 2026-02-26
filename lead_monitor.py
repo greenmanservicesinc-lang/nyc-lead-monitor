@@ -51,80 +51,60 @@ def save_seen_leads(seen):
     with open(SEEN_FILE, 'w') as f:
         json.dump(seen, f)
 
-# ── Owner Lookup (Automatic - No API Key Needed) ─────────────
-def lookup_owner(address, borough):
+# ── Owner Lookup (BBL-based, no external API needed) ─────────
+BOROUGH_TO_CODE = {
+    'MANHATTAN': '1', 'MN': '1',
+    'BRONX':     '2', 'BX': '2',
+    'BROOKLYN':  '3', 'BK': '3',
+    'QUEENS':    '4', 'QN': '4', 'QU': '4',
+    'STATEN ISLAND': '5', 'SI': '5'
+}
+
+def bbl_to_acris_url(bbl_str):
+    """Build a direct ACRIS link for a specific property BBL."""
+    if not bbl_str:
+        return None
+    bbl_clean = str(bbl_str).zfill(10)
+    return f"https://a836-acris.nyc.gov/DS/DocumentSearch/BBL?BBL={bbl_clean}"
+
+def lookup_owner_from_bbl(bbl_str):
     """
-    Given a street address + borough, returns the property owner
-    name and mailing address from NYC public records.
-    Uses NYC GeoSearch (free, no key) → BBL → ACRIS/Finance data.
+    Given a BBL (from HPD/DOB data directly), query NYC MapPLUTO
+    for owner name + mailing address. No GeoSearch needed.
     """
+    if not bbl_str:
+        return None, None
     try:
-        # Step 1: Get BBL from GeoSearch
-        geo_url = "https://geosearch.planninglabs.nyc/v2/search"
-        params = {'text': f"{address}, {borough}, NY", 'size': 1}
-        r = requests.get(geo_url, params=params, timeout=10)
-        if r.status_code != 200:
-            return None
+        bbl_clean = str(bbl_str).zfill(10)
+        boro  = bbl_clean[0]
+        block = str(int(bbl_clean[1:6]))
+        lot   = str(int(bbl_clean[6:10]))
 
-        features = r.json().get('features', [])
-        if not features:
-            return None
+        # MapPLUTO has owner name (ownername field)
+        url = "https://data.cityofnewyork.us/resource/64uk-42ks.json"
+        params = {'borocode': boro, 'block': block, 'lot': lot, '$limit': 1}
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200 and r.json():
+            rec = r.json()[0]
+            owner = rec.get('ownername', '').strip()
+            addr  = f"{rec.get('address','').strip()}, {rec.get('city','').strip()}, {rec.get('state','').strip()} {rec.get('zipcode','').strip()}".strip(', ')
+            if owner:
+                return owner, addr
 
-        props = features[0].get('properties', {})
-        pad_bbl = props.get('pad_bbl', '')
-        if not pad_bbl or len(pad_bbl) < 10:
-            return None
+        # Fallback: try property assessment dataset
+        url2 = "https://data.cityofnewyork.us/resource/yjxr-fw8i.json"
+        r2 = requests.get(url2, params=params, timeout=15)
+        if r2.status_code == 200 and r2.json():
+            rec2 = r2.json()[0]
+            owner = rec2.get('ownername', '').strip()
+            addr  = f"{rec2.get('address','').strip()}, {rec2.get('city','').strip()}, {rec2.get('state','').strip()} {rec2.get('zipcode','').strip()}".strip(', ')
+            if owner:
+                return owner, addr
 
-        # BBL = 10 digits: 1 borough + 5 block + 4 lot
-        boro_code = pad_bbl[0]
-        block     = str(int(pad_bbl[1:6]))   # strip leading zeros for API
-        lot       = str(int(pad_bbl[6:10]))
-
-        # Step 2: Query NYC Finance property data (public, no key)
-        finance_url = "https://data.cityofnewyork.us/resource/yjxr-fw8i.json"
-        params2 = {
-            'borocode': boro_code,
-            'block': block,
-            'lot': lot,
-            '$limit': 1
-        }
-        r2 = requests.get(finance_url, params=params2, timeout=10)
-        if r2.status_code != 200:
-            return None
-
-        records = r2.json()
-        if not records:
-            return None
-
-        rec = records[0]
-        owner_name    = rec.get('ownername', '').strip()
-        mail_address  = rec.get('address', '').strip()
-        mail_city     = rec.get('city', '').strip()
-        mail_state    = rec.get('state', '').strip()
-        mail_zip      = rec.get('zipcode', '').strip()
-
-        if not owner_name:
-            return None
-
-        return {
-            'name':    owner_name,
-            'mailing': f"{mail_address}, {mail_city}, {mail_state} {mail_zip}".strip(', ')
-        }
-
+        return None, None
     except Exception as e:
         print(f"  Owner lookup error: {e}")
-        return None
-
-def borough_name_to_code(borough_str):
-    """Convert borough name to single digit code for Finance API."""
-    mapping = {
-        'MANHATTAN': '1', 'MN': '1',
-        'BRONX':     '2', 'BX': '2',
-        'BROOKLYN':  '3', 'BK': '3',
-        'QUEENS':    '4', 'QN': '4', 'QU': '4',
-        'STATEN ISLAND': '5', 'SI': '5'
-    }
-    return mapping.get(borough_str.upper().strip(), '')
+        return None, None
 
 # ── HPD Violations ────────────────────────────────────────────
 def check_hpd_violations():
@@ -157,7 +137,9 @@ def check_hpd_violations():
                 vid = str(v.get('violationid', ''))
                 if vid and vid not in seen['hpd']:
                     addr_str = f"{v.get('housenumber', '')} {v.get('streetname', '')}".strip()
-                    owner = lookup_owner(addr_str, borough)
+                    bbl = str(v.get('bbl', '')).strip()
+                    owner_name, owner_addr = lookup_owner_from_bbl(bbl)
+                    acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
                     all_violations.append({
                         'id':            vid,
                         'address':       f"{addr_str}, {borough}",
@@ -166,7 +148,9 @@ def check_hpd_violations():
                         'class':         v.get('class', ''),
                         'description':   v.get('novdescription', ''),
                         'inspection_date': (v.get('inspectiondate', '')[:10]),
-                        'owner':         owner
+                        'owner_name':    owner_name,
+                        'owner_addr':    owner_addr,
+                        'acris_url':     acris_url
                     })
                     seen['hpd'].append(vid)
         except Exception as e:
@@ -299,14 +283,18 @@ def check_dob_violations():
             if vid and vid not in seen['dob']:
                 addr_str = f"{v.get('house_number', '')} {v.get('street', '')}".strip()
                 borough  = str(v.get('borough', '')).upper()
-                owner    = lookup_owner(addr_str, borough) if addr_str else None
+                bbl = str(v.get('bbl', '')).strip()
+                owner_name, owner_addr = lookup_owner_from_bbl(bbl)
+                acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
                 all_violations.append({
                     'id':          vid,
                     'address':     f"{addr_str}, {borough}",
                     'description': v.get('description', v.get('violation_type', 'N/A')),
                     'issue_date':  str(v.get('issue_date', ''))[:10],
                     'disposition': v.get('disposition_date', 'Open'),
-                    'owner':       owner
+                    'owner_name':  owner_name,
+                    'owner_addr':  owner_addr,
+                    'acris_url':   acris_url
                 })
                 seen['dob'].append(vid)
     except Exception as e:
@@ -352,7 +340,9 @@ def check_ecb_violations():
             if vid and vid not in seen['ecb']:
                 addr_str = f"{v.get('house_number', '')} {v.get('street_name', '')}".strip()
                 borough  = str(v.get('borough', '')).upper()
-                owner    = lookup_owner(addr_str, borough) if addr_str else None
+                bbl = str(v.get('bbl', '')).strip()
+                owner_name, owner_addr = lookup_owner_from_bbl(bbl)
+                acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
                 all_violations.append({
                     'id':          vid,
                     'address':     f"{addr_str}, {borough}",
@@ -360,7 +350,9 @@ def check_ecb_violations():
                     'issue_date':  str(v.get('issue_date', ''))[:10],
                     'fine':        v.get('penalty_imposed', 'N/A'),
                     'status':      v.get('ecb_violation_status', 'N/A'),
-                    'owner':       owner
+                    'owner_name':  owner_name,
+                    'owner_addr':  owner_addr,
+                    'acris_url':   acris_url
                 })
                 seen['ecb'].append(vid)
     except Exception as e:
@@ -457,20 +449,23 @@ def check_reddit():
     return new_posts
 
 # ── Owner HTML Block ──────────────────────────────────────────
-def owner_html(owner):
-    if owner:
+def owner_html(owner_name, owner_addr, acris_url):
+    if owner_name:
         return f"""
         <div style="margin-top:8px; padding:8px; background:#e8f4e8; border-radius:4px; border-left:3px solid #28a745;">
             <span style="font-weight:bold; color:#28a745;">👤 Owner Found:</span>
-            <strong>{owner['name']}</strong><br>
-            📬 {owner['mailing']}
+            <strong>{owner_name}</strong><br>
+            📬 {owner_addr or 'Mailing address not available'}
+            &nbsp;&nbsp;
+            <a href="{acris_url}" style="background:#28a745;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">
+            View in ACRIS →</a>
         </div>"""
     else:
         return f"""
         <div style="margin-top:8px;">
-            <a href="https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+            <a href="{acris_url}"
                style="background:#0066ff;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">
-               🔍 Find Owner in ACRIS →</a>
+               🔍 Find Owner in ACRIS (direct link) →</a>
         </div>"""
 
 # ── Send Email ────────────────────────────────────────────────
@@ -507,7 +502,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div><span class="label">Class:</span> {v.get('class','N/A')} {'⚠️ EMERGENCY' if v.get('class')=='C' else ''}</div>
                 <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
-                {owner_html(v.get('owner'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
             </div>"""
         html += '</div>'
 
@@ -520,7 +515,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div class="address">📍 {v['address']}</div>
                 <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
-                {owner_html(v.get('owner'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
             </div>"""
         html += '</div>'
 
@@ -534,7 +529,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div><span class="label">Violation:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Fine:</span> ${v.get('fine','N/A')} &nbsp;|&nbsp; <span class="label">Status:</span> {v.get('status','N/A')}</div>
                 <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
-                {owner_html(v.get('owner'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
             </div>"""
         html += '</div>'
 
