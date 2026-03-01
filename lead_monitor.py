@@ -682,81 +682,91 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
     <p style="color:#666;">{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Green Man Services Inc.</p>
     """
 
-    # HPD
-    if hpd:
-        html += f'<div class="section"><h2>🏛️ HPD Housing Violations ({len(hpd)} new)</h2>'
-        for v in hpd[:15]:
-            ec = 'emergency' if v.get('class') == 'C' else ''
+    # ── EMERGENCY HPD (Class C only) ──
+    hpd_emergency = [v for v in hpd if v.get('class') == 'C']
+    hpd_other     = [v for v in hpd if v.get('class') != 'C']
+
+    if hpd_emergency:
+        html += f'<div class="section"><h2>🚨 EMERGENCY HPD Violations — Class C ({len(hpd_emergency)} new)</h2>'
+        for v in hpd_emergency[:8]:
             html += f"""
-            <div class="lead {ec}">
+            <div class="lead emergency">
                 <div class="address">📍 {v['address']}</div>
-                <div><span class="label">Apartment:</span> {v.get('apartment','N/A')}</div>
-                <div><span class="label">Class:</span> {v.get('class','N/A')} {'⚠️ EMERGENCY' if v.get('class')=='C' else ''}</div>
+                <div><span class="label">Apt:</span> {v.get('apartment','N/A')} &nbsp;|&nbsp; <span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
                 <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
-                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
                 {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
             </div>"""
         html += '</div>'
 
-    # DOB
-    if dob:
-        html += f'<div class="section"><h2>🏗️ DOB Building Violations ({len(dob)} new)</h2>'
-        for v in dob[:15]:
-            html += f"""
-            <div class="lead">
-                <div class="address">📍 {v['address']}</div>
-                <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
-                <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
-                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
-            </div>"""
-        html += '</div>'
-
-    # ECB
+    # ── ECB (already fined — hot leads) ──
     if ecb:
-        html += f'<div class="section"><h2>⚖️ ECB Violations ({len(ecb)} new)</h2>'
-        for v in ecb[:15]:
+        html += f'<div class="section"><h2>⚖️ ECB Violations — Already Fined ({len(ecb)} new)</h2>'
+        for v in ecb[:8]:
             html += f"""
             <div class="lead">
                 <div class="address">📍 {v['address']}</div>
-                <div><span class="label">Violation:</span> {v.get('description','')[:180]}</div>
-                <div><span class="label">Fine:</span> ${v.get('fine','N/A')} &nbsp;|&nbsp; <span class="label">Status:</span> {v.get('status','N/A')}</div>
-                <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
+                <div><span class="label">Issue:</span> {v.get('description','')[:150]}</div>
+                <div><span class="label">Fine:</span> ${v.get('fine','N/A')} &nbsp;|&nbsp; <span class="label">Status:</span> {v.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
                 {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
             </div>"""
         html += '</div>'
 
-    # DOHMH
+    # ── DOHMH Restaurants ──
     if dohmh:
         code_labels = {'04L':'🐭 Mice','04M':'🐀 Rats','04N':'🪳 Roaches','08A':'🚪 Not Vermin-Proof'}
         html += f'<div class="section"><h2>🍽️ DOHMH Restaurant Violations ({len(dohmh)} new)</h2>'
-        for v in dohmh[:15]:
+        for v in dohmh[:8]:
             label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
             html += f"""
             <div class="lead">
                 <div class="address">📍 {v.get('restaurant','N/A')}</div>
-                <div><span class="label">Address:</span> {v['address']}</div>
-                <div><span class="label">Phone:</span> {v.get('phone','N/A')}</div>
-                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:150]}</div>
+                <div><span class="label">Address:</span> {v['address']} &nbsp;|&nbsp; <span class="label">Phone:</span> {v.get('phone','N/A')}</div>
+                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:120]}</div>
                 <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
             </div>"""
         html += '</div>'
 
-    # 311
+    # ── 311 Complaints ──
     if c311:
         html += f'<div class="section"><h2>📞 311 Complaints ({len(c311)} new)</h2>'
-        for c in c311[:15]:
+        for c in c311[:8]:
             html += f"""
             <div class="lead">
                 <div class="address">📍 {c['address']}</div>
-                <div><span class="label">Type:</span> {c.get('type','N/A')} — {c.get('descriptor','')}</div>
-                <div><span class="label">Status:</span> {c.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {c.get('created_date','N/A')}</div>
+                <div><span class="label">Type:</span> {c.get('descriptor','')} &nbsp;|&nbsp; <span class="label">Status:</span> {c.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {c.get('created_date','N/A')}</div>
             </div>"""
         html += '</div>'
 
-    # Craigslist
+    # ── DOB Violations ──
+    if dob:
+        html += f'<div class="section"><h2>🏗️ DOB Building Violations ({len(dob)} new)</h2>'
+        for v in dob[:8]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v['address']}</div>
+                <div><span class="label">Issue:</span> {v.get('description','')[:150]}</div>
+                <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
+            </div>"""
+        html += '</div>'
+
+    # ── HPD Other (non-emergency) ──
+    if hpd_other:
+        html += f'<div class="section"><h2>🏛️ HPD Housing Violations — Other ({len(hpd_other)} new)</h2>'
+        for v in hpd_other[:8]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v['address']}</div>
+                <div><span class="label">Apt:</span> {v.get('apartment','N/A')} &nbsp;|&nbsp; <span class="label">Class:</span> {v.get('class','N/A')} &nbsp;|&nbsp; <span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
+                <div><span class="label">Issue:</span> {v.get('description','')[:150]}</div>
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
+            </div>"""
+        html += '</div>'
+
+    # ── Craigslist ──
     if craigslist:
         html += f'<div class="section"><h2>📋 Craigslist ({len(craigslist)} new)</h2>'
-        for p in craigslist[:10]:
+        for p in craigslist[:5]:
             html += f"""
             <div class="lead">
                 <div class="address">{p.get('title','N/A')}</div>
@@ -764,14 +774,14 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
             </div>"""
         html += '</div>'
 
-    # Reddit
+    # ── Reddit ──
     if reddit:
         html += f'<div class="section"><h2>💬 Reddit ({len(reddit)} new)</h2>'
-        for p in reddit[:10]:
+        for p in reddit[:5]:
             html += f"""
             <div class="lead">
-                <div class="address">r/{p.get('subreddit','')}: {p.get('title','N/A')}</div>
-                <div style="color:#666;font-size:.9em;">{p.get('text','')[:150]}</div>
+                <div class="address">{p.get('title','N/A')}</div>
+                <div>{p.get('subreddit','')}</div>
                 <a href="{p.get('url','#')}" style="background:#ff4500;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">View Post →</a>
             </div>"""
         html += '</div>'
