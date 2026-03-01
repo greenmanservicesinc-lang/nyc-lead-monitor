@@ -129,66 +129,68 @@ def lookup_ny_dos(entity_name):
     Uses the public NY Open Data API - no key needed.
     """
     if not entity_name or not is_business_entity(entity_name):
+        print(f"  DOS: skipping '{entity_name}' (not a business entity)")
         return None
     try:
-        # NY DOS corporations dataset on NY Open Data
+        print(f"  DOS: searching for '{entity_name}'")
         url = "https://data.ny.gov/resource/ej5i-dqe7.json"
-        # Clean the name for search - remove common suffixes for better matching
+
+        # Clean name - remove legal suffix for broader search
         search_name = entity_name.upper().strip()
+        # Use first meaningful words for search (max 20 chars for safety)
+        words = [w for w in search_name.split() if w not in ('LLC','INC','CORP','LLP','LP','THE','OF','AND')]
+        short = ' '.join(words[:2]) if words else search_name[:20]
+
         params = {
-            '$where': f"upper(current_entity_name) like '%{search_name[:30]}%'",
-            '$limit': 1,
-            '$order': 'dos_id DESC'  # get most recent
+            '$q': short,        # full-text search - more reliable than $where LIKE
+            '$limit': 5,
+            '$order': 'dos_id DESC'
         }
         r = requests.get(url, params=params, timeout=15)
+        print(f"  DOS: status={r.status_code}, results={len(r.json()) if r.status_code==200 else 'N/A'}")
 
         if r.status_code != 200 or not r.json():
-            # Try with shorter name in case of truncation
-            short_name = search_name.split()[0] if ' ' in search_name else search_name
-            params2 = {
-                '$where': f"upper(current_entity_name) like '%{short_name}%'",
-                '$limit': 3,
-                '$order': 'dos_id DESC'
-            }
-            r = requests.get(url, params=params2, timeout=15)
-            if r.status_code != 200 or not r.json():
-                return None
+            print(f"  DOS: no results for '{short}'")
+            return None
 
         results = r.json()
-        # Try to find best match
+
+        # Find best match - entity name should contain our search words
         rec = None
         for result in results:
-            if search_name[:15].upper() in result.get('current_entity_name', '').upper():
+            result_name = result.get('current_entity_name', '').upper()
+            if words and words[0] in result_name:
                 rec = result
+                print(f"  DOS: matched '{result_name}'")
                 break
         if not rec:
             rec = results[0]
+            print(f"  DOS: using first result '{rec.get('current_entity_name','')}'")
 
-        entity_type   = rec.get('entity_type', '').strip()
-        status        = rec.get('entity_status', '').strip()
-        dos_id        = rec.get('dos_id', '').strip()
+        entity_type = rec.get('entity_type', '').strip()
+        status      = rec.get('entity_status', '').strip()
+        dos_id      = rec.get('dos_id', '').strip()
 
-        # Agent info
-        agent_name    = rec.get('registered_agent_name', '').strip()
-        agent_addr1   = rec.get('registered_agent_address_1', '').strip()
-        agent_addr2   = rec.get('registered_agent_address_2', '').strip()
-        agent_city    = rec.get('registered_agent_city', '').strip()
-        agent_state   = rec.get('registered_agent_state', '').strip()
-        agent_zip     = rec.get('registered_agent_zip', '').strip()
+        agent_name  = rec.get('registered_agent_name', '').strip()
+        agent_addr1 = rec.get('registered_agent_address_1', '').strip()
+        agent_city  = rec.get('registered_agent_city', '').strip()
+        agent_state = rec.get('registered_agent_state', '').strip()
+        agent_zip   = rec.get('registered_agent_zip', '').strip()
 
-        # Principal office
-        office_addr1  = rec.get('principal_executive_office_address_1', '').strip()
-        office_city   = rec.get('principal_executive_office_city', '').strip()
-        office_state  = rec.get('principal_executive_office_state', '').strip()
-        office_zip    = rec.get('principal_executive_office_zip', '').strip()
+        office_addr = rec.get('principal_executive_office_address_1', '').strip()
+        office_city = rec.get('principal_executive_office_city', '').strip()
+        office_state= rec.get('principal_executive_office_state', '').strip()
+        office_zip  = rec.get('principal_executive_office_zip', '').strip()
 
-        agent_full  = ', '.join(filter(None, [agent_name, agent_addr1, agent_addr2, agent_city, agent_state, agent_zip]))
-        office_full = ', '.join(filter(None, [office_addr1, office_city, office_state, office_zip]))
+        agent_full  = ', '.join(filter(None, [agent_name, agent_addr1, agent_city, agent_state, agent_zip]))
+        office_full = ', '.join(filter(None, [office_addr, office_city, office_state, office_zip]))
         dos_url     = f"https://apps.dos.ny.gov/publicInquiry/EntitySearch?SEARCH_TYPE=1&DOS_ID={dos_id}" if dos_id else None
 
-        if not entity_type and not agent_name and not office_full:
+        if not entity_type and not agent_full and not office_full:
+            print(f"  DOS: found record but all fields empty")
             return None
 
+        print(f"  DOS: SUCCESS - {entity_type} | {status} | agent: {agent_full[:40] if agent_full else 'none'}")
         return {
             'entity_type': entity_type,
             'status':      status,
@@ -198,7 +200,7 @@ def lookup_ny_dos(entity_name):
         }
 
     except Exception as e:
-        print(f"  NY DOS lookup error: {e}")
+        print(f"  DOS lookup error: {e}")
         return None
 
 # ── HPD Violations ────────────────────────────────────────────
