@@ -125,26 +125,29 @@ def is_business_entity(name):
 def lookup_ny_dos(entity_name):
     """
     Search NY Department of State for business entity info.
-    Returns agent name, office address, entity type, status.
-    Uses the public NY Open Data API - no key needed.
+    Dataset: Active Corporations Beginning 1800 (n9v6-gdp6)
     """
     if not entity_name or not is_business_entity(entity_name):
         print(f"  DOS: skipping '{entity_name}' (not a business entity)")
         return None
     try:
         print(f"  DOS: searching for '{entity_name}'")
-        url = "https://data.ny.gov/resource/ej5i-dqe7.json"
 
-        # Clean name - remove legal suffix for broader search
+        # Correct endpoint - Active Corporations: Beginning 1800
+        url = "https://data.ny.gov/resource/n9v6-gdp6.json"
+
+        # Build search words - strip legal suffixes
         search_name = entity_name.upper().strip()
-        # Use first meaningful words for search (max 20 chars for safety)
-        words = [w for w in search_name.split() if w not in ('LLC','INC','CORP','LLP','LP','THE','OF','AND')]
-        short = ' '.join(words[:2]) if words else search_name[:20]
+        stop_words = {'LLC','L.L.C.','INC','INC.','CORP','CORP.','LLP','LP',
+                      'THE','OF','AND','A','AN'}
+        words = [w.rstrip('.,') for w in search_name.split()
+                 if w.rstrip('.,') not in stop_words and len(w) > 2]
+        short = ' '.join(words[:2]) if words else search_name[:25]
 
         params = {
-            '$q': short,        # full-text search - more reliable than $where LIKE
+            '$q':     short,
             '$limit': 5,
-            '$order': 'dos_id DESC'
+            '$where': "entity_type != 'DISSOLVED'"
         }
         r = requests.get(url, params=params, timeout=15)
         print(f"  DOS: status={r.status_code}, results={len(r.json()) if r.status_code==200 else 'N/A'}")
@@ -155,7 +158,7 @@ def lookup_ny_dos(entity_name):
 
         results = r.json()
 
-        # Find best match - entity name should contain our search words
+        # Find best match
         rec = None
         for result in results:
             result_name = result.get('current_entity_name', '').upper()
@@ -168,34 +171,44 @@ def lookup_ny_dos(entity_name):
             print(f"  DOS: using first result '{rec.get('current_entity_name','')}'")
 
         entity_type = rec.get('entity_type', '').strip()
-        status      = rec.get('entity_status', '').strip()
         dos_id      = rec.get('dos_id', '').strip()
 
+        # CEO / Chairman info (most useful — actual person name)
+        ceo_name    = rec.get('chairman_name', '').strip()
+        ceo_addr1   = rec.get('chairman_address_1', '').strip()
+        ceo_city    = rec.get('chairman_city', '').strip()
+        ceo_state   = rec.get('chairman_state', '').strip()
+        ceo_zip     = rec.get('chairman_zip', '').strip()
+
+        # Registered Agent
         agent_name  = rec.get('registered_agent_name', '').strip()
-        agent_addr1 = rec.get('registered_agent_address_1', '').strip()
+        agent_addr  = rec.get('registered_agent_address_1', '').strip()
         agent_city  = rec.get('registered_agent_city', '').strip()
         agent_state = rec.get('registered_agent_state', '').strip()
         agent_zip   = rec.get('registered_agent_zip', '').strip()
 
-        office_addr = rec.get('principal_executive_office_address_1', '').strip()
-        office_city = rec.get('principal_executive_office_city', '').strip()
-        office_state= rec.get('principal_executive_office_state', '').strip()
-        office_zip  = rec.get('principal_executive_office_zip', '').strip()
+        # DOS Process address (fallback contact address)
+        process_name = rec.get('dos_process_name', '').strip()
+        process_addr = rec.get('dos_process_address_1', '').strip()
+        process_city = rec.get('dos_process_city', '').strip()
+        process_state= rec.get('dos_process_state', '').strip()
+        process_zip  = rec.get('dos_process_zip', '').strip()
 
-        agent_full  = ', '.join(filter(None, [agent_name, agent_addr1, agent_city, agent_state, agent_zip]))
-        office_full = ', '.join(filter(None, [office_addr, office_city, office_state, office_zip]))
-        dos_url     = f"https://apps.dos.ny.gov/publicInquiry/EntitySearch?SEARCH_TYPE=1&DOS_ID={dos_id}" if dos_id else None
+        ceo_full     = ', '.join(filter(None, [ceo_name, ceo_addr1, ceo_city, ceo_state, ceo_zip]))
+        agent_full   = ', '.join(filter(None, [agent_name, agent_addr, agent_city, agent_state, agent_zip]))
+        process_full = ', '.join(filter(None, [process_name, process_addr, process_city, process_state, process_zip]))
+        dos_url      = f"https://apps.dos.ny.gov/publicInquiry/EntitySearch?SEARCH_TYPE=1&DOS_ID={dos_id}" if dos_id else None
 
-        if not entity_type and not agent_full and not office_full:
-            print(f"  DOS: found record but all fields empty")
+        if not entity_type and not ceo_full and not agent_full:
+            print(f"  DOS: record found but all fields empty")
             return None
 
-        print(f"  DOS: SUCCESS - {entity_type} | {status} | agent: {agent_full[:40] if agent_full else 'none'}")
+        print(f"  DOS: SUCCESS - {entity_type} | CEO: {ceo_full[:40] if ceo_full else 'none'}")
         return {
             'entity_type': entity_type,
-            'status':      status,
+            'ceo':         ceo_full or None,
             'agent':       agent_full or None,
-            'office':      office_full or None,
+            'process':     process_full or None,
             'dos_url':     dos_url
         }
 
@@ -563,15 +576,13 @@ def owner_html(owner_name, owner_addr, acris_url, dos_info=None):
         </div>"""
     
     if dos_info:
-        status_color = '#28a745' if 'ACTIVE' in dos_info.get('status','').upper() else '#dc3545'
         html += f"""
         <div style="margin-top:6px; padding:10px; background:#e8f0fe; border-radius:4px; border-left:3px solid #4a6cf7;">
-            <div style="font-weight:bold; color:#4a6cf7;">🏢 NY DOS Business Info:</div>
-            <div>Type: <strong>{dos_info.get('entity_type','N/A')}</strong> &nbsp;|&nbsp; 
-                 Status: <strong style="color:{status_color};">{dos_info.get('status','N/A')}</strong></div>
-            {'<div>🧑‍💼 Agent: ' + dos_info['agent'] + '</div>' if dos_info.get('agent') else ''}
-            {'<div>🏠 Office: ' + dos_info['office'] + '</div>' if dos_info.get('office') else ''}
-            {'<a href="' + dos_info['dos_url'] + '" style="display:inline-block;margin-top:5px;background:#4a6cf7;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">NY DOS Record →</a>' if dos_info.get('dos_url') else ''}
+            <div style="font-weight:bold; color:#4a6cf7;">🏢 NY DOS: <span style="color:#000;">{dos_info.get('entity_type','')}</span></div>
+            {'<div>👤 CEO/Officer: <strong>' + dos_info["ceo"] + '</strong></div>' if dos_info.get('ceo') else ''}
+            {'<div>🧑‍💼 Agent: ' + dos_info["agent"] + '</div>' if dos_info.get('agent') else ''}
+            {'<div>📮 Process Address: ' + dos_info["process"] + '</div>' if dos_info.get('process') else ''}
+            {'<a href="' + dos_info["dos_url"] + '" style="display:inline-block;margin-top:5px;background:#4a6cf7;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">NY DOS Record →</a>' if dos_info.get('dos_url') else ''}
         </div>"""
 
     html += f"""
