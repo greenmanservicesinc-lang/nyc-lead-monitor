@@ -106,6 +106,101 @@ def lookup_owner_from_bbl(bbl_str):
         print(f"  Owner lookup error: {e}")
         return None, None
 
+# ── NY DOS Business Entity Lookup ─────────────────────────────
+BUSINESS_SUFFIXES = [
+    'LLC', 'L.L.C', 'INC', 'CORP', 'CO.', ' CO ',
+    'REALTY', 'PROPERTIES', 'PROPERTY', 'HOLDINGS',
+    'ASSOCIATES', 'PARTNERS', 'LP', 'L.P', 'LLP',
+    'REAL ESTATE', 'MGMT', 'MANAGEMENT', 'GROUP',
+    'ENTERPRISES', 'VENTURES', 'TRUST', 'FUND'
+]
+
+def is_business_entity(name):
+    """Check if owner name looks like a business (not a private person)."""
+    if not name:
+        return False
+    name_upper = name.upper()
+    return any(suffix in name_upper for suffix in BUSINESS_SUFFIXES)
+
+def lookup_ny_dos(entity_name):
+    """
+    Search NY Department of State for business entity info.
+    Returns agent name, office address, entity type, status.
+    Uses the public NY Open Data API - no key needed.
+    """
+    if not entity_name or not is_business_entity(entity_name):
+        return None
+    try:
+        # NY DOS corporations dataset on NY Open Data
+        url = "https://data.ny.gov/resource/ej5i-dqe7.json"
+        # Clean the name for search - remove common suffixes for better matching
+        search_name = entity_name.upper().strip()
+        params = {
+            '$where': f"upper(current_entity_name) like '%{search_name[:30]}%'",
+            '$limit': 1,
+            '$order': 'dos_id DESC'  # get most recent
+        }
+        r = requests.get(url, params=params, timeout=15)
+
+        if r.status_code != 200 or not r.json():
+            # Try with shorter name in case of truncation
+            short_name = search_name.split()[0] if ' ' in search_name else search_name
+            params2 = {
+                '$where': f"upper(current_entity_name) like '%{short_name}%'",
+                '$limit': 3,
+                '$order': 'dos_id DESC'
+            }
+            r = requests.get(url, params=params2, timeout=15)
+            if r.status_code != 200 or not r.json():
+                return None
+
+        results = r.json()
+        # Try to find best match
+        rec = None
+        for result in results:
+            if search_name[:15].upper() in result.get('current_entity_name', '').upper():
+                rec = result
+                break
+        if not rec:
+            rec = results[0]
+
+        entity_type   = rec.get('entity_type', '').strip()
+        status        = rec.get('entity_status', '').strip()
+        dos_id        = rec.get('dos_id', '').strip()
+
+        # Agent info
+        agent_name    = rec.get('registered_agent_name', '').strip()
+        agent_addr1   = rec.get('registered_agent_address_1', '').strip()
+        agent_addr2   = rec.get('registered_agent_address_2', '').strip()
+        agent_city    = rec.get('registered_agent_city', '').strip()
+        agent_state   = rec.get('registered_agent_state', '').strip()
+        agent_zip     = rec.get('registered_agent_zip', '').strip()
+
+        # Principal office
+        office_addr1  = rec.get('principal_executive_office_address_1', '').strip()
+        office_city   = rec.get('principal_executive_office_city', '').strip()
+        office_state  = rec.get('principal_executive_office_state', '').strip()
+        office_zip    = rec.get('principal_executive_office_zip', '').strip()
+
+        agent_full  = ', '.join(filter(None, [agent_name, agent_addr1, agent_addr2, agent_city, agent_state, agent_zip]))
+        office_full = ', '.join(filter(None, [office_addr1, office_city, office_state, office_zip]))
+        dos_url     = f"https://apps.dos.ny.gov/publicInquiry/EntitySearch?SEARCH_TYPE=1&DOS_ID={dos_id}" if dos_id else None
+
+        if not entity_type and not agent_name and not office_full:
+            return None
+
+        return {
+            'entity_type': entity_type,
+            'status':      status,
+            'agent':       agent_full or None,
+            'office':      office_full or None,
+            'dos_url':     dos_url
+        }
+
+    except Exception as e:
+        print(f"  NY DOS lookup error: {e}")
+        return None
+
 # ── HPD Violations ────────────────────────────────────────────
 def check_hpd_violations():
     print("Checking HPD violations...")
@@ -140,6 +235,7 @@ def check_hpd_violations():
                     bbl = str(v.get('bbl', '')).strip()
                     owner_name, owner_addr = lookup_owner_from_bbl(bbl)
                     acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+                    dos_info  = lookup_ny_dos(owner_name) if owner_name else None
                     all_violations.append({
                         'id':            vid,
                         'address':       f"{addr_str}, {borough}",
@@ -150,7 +246,8 @@ def check_hpd_violations():
                         'inspection_date': (v.get('inspectiondate', '')[:10]),
                         'owner_name':    owner_name,
                         'owner_addr':    owner_addr,
-                        'acris_url':     acris_url
+                        'acris_url':     acris_url,
+                        'dos_info':      dos_info
                     })
                     seen['hpd'].append(vid)
         except Exception as e:
@@ -286,6 +383,7 @@ def check_dob_violations():
                 bbl = str(v.get('bbl', '')).strip()
                 owner_name, owner_addr = lookup_owner_from_bbl(bbl)
                 acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+                dos_info  = lookup_ny_dos(owner_name) if owner_name else None
                 all_violations.append({
                     'id':          vid,
                     'address':     f"{addr_str}, {borough}",
@@ -294,7 +392,8 @@ def check_dob_violations():
                     'disposition': v.get('disposition_date', 'Open'),
                     'owner_name':  owner_name,
                     'owner_addr':  owner_addr,
-                    'acris_url':   acris_url
+                    'acris_url':   acris_url,
+                    'dos_info':    dos_info
                 })
                 seen['dob'].append(vid)
     except Exception as e:
@@ -343,6 +442,7 @@ def check_ecb_violations():
                 bbl = str(v.get('bbl', '')).strip()
                 owner_name, owner_addr = lookup_owner_from_bbl(bbl)
                 acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+                dos_info  = lookup_ny_dos(owner_name) if owner_name else None
                 all_violations.append({
                     'id':          vid,
                     'address':     f"{addr_str}, {borough}",
@@ -352,7 +452,8 @@ def check_ecb_violations():
                     'status':      v.get('ecb_violation_status', 'N/A'),
                     'owner_name':  owner_name,
                     'owner_addr':  owner_addr,
-                    'acris_url':   acris_url
+                    'acris_url':   acris_url,
+                    'dos_info':    dos_info
                 })
                 seen['ecb'].append(vid)
     except Exception as e:
@@ -449,24 +550,36 @@ def check_reddit():
     return new_posts
 
 # ── Owner HTML Block ──────────────────────────────────────────
-def owner_html(owner_name, owner_addr, acris_url):
+def owner_html(owner_name, owner_addr, acris_url, dos_info=None):
+    html = ''
+
     if owner_name:
-        return f"""
-        <div style="margin-top:8px; padding:8px; background:#e8f4e8; border-radius:4px; border-left:3px solid #28a745;">
-            <span style="font-weight:bold; color:#28a745;">👤 Owner Found:</span>
-            <strong>{owner_name}</strong><br>
-            📬 {owner_addr or 'Mailing address not available'}
-            &nbsp;&nbsp;
-            <a href="{acris_url}" style="background:#28a745;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">
-            View in ACRIS →</a>
+        html += f"""
+        <div style="margin-top:8px; padding:10px; background:#e8f4e8; border-radius:4px; border-left:3px solid #28a745;">
+            <div style="font-weight:bold; color:#28a745;">👤 Owner: <span style="color:#000;">{owner_name}</span></div>
+            {'<div>📬 ' + owner_addr + '</div>' if owner_addr else ''}
         </div>"""
-    else:
-        return f"""
-        <div style="margin-top:8px;">
+    
+    if dos_info:
+        status_color = '#28a745' if 'ACTIVE' in dos_info.get('status','').upper() else '#dc3545'
+        html += f"""
+        <div style="margin-top:6px; padding:10px; background:#e8f0fe; border-radius:4px; border-left:3px solid #4a6cf7;">
+            <div style="font-weight:bold; color:#4a6cf7;">🏢 NY DOS Business Info:</div>
+            <div>Type: <strong>{dos_info.get('entity_type','N/A')}</strong> &nbsp;|&nbsp; 
+                 Status: <strong style="color:{status_color};">{dos_info.get('status','N/A')}</strong></div>
+            {'<div>🧑‍💼 Agent: ' + dos_info['agent'] + '</div>' if dos_info.get('agent') else ''}
+            {'<div>🏠 Office: ' + dos_info['office'] + '</div>' if dos_info.get('office') else ''}
+            {'<a href="' + dos_info['dos_url'] + '" style="display:inline-block;margin-top:5px;background:#4a6cf7;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">NY DOS Record →</a>' if dos_info.get('dos_url') else ''}
+        </div>"""
+
+    html += f"""
+        <div style="margin-top:6px;">
             <a href="{acris_url}"
-               style="background:#0066ff;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">
-               🔍 Find Owner in ACRIS (direct link) →</a>
+               style="background:#0066ff;color:white;padding:5px 12px;text-decoration:none;border-radius:4px;font-size:.85em;">
+               🔍 ACRIS Property Record →</a>
         </div>"""
+
+    return html
 
 # ── Send Email ────────────────────────────────────────────────
 def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
@@ -502,7 +615,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div><span class="label">Class:</span> {v.get('class','N/A')} {'⚠️ EMERGENCY' if v.get('class')=='C' else ''}</div>
                 <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
-                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
             </div>"""
         html += '</div>'
 
@@ -515,7 +628,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div class="address">📍 {v['address']}</div>
                 <div><span class="label">Issue:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
-                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
             </div>"""
         html += '</div>'
 
@@ -529,7 +642,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
                 <div><span class="label">Violation:</span> {v.get('description','')[:180]}</div>
                 <div><span class="label">Fine:</span> ${v.get('fine','N/A')} &nbsp;|&nbsp; <span class="label">Status:</span> {v.get('status','N/A')}</div>
                 <div><span class="label">Date:</span> {v.get('issue_date','N/A')}</div>
-                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'))}
+                {owner_html(v.get('owner_name'), v.get('owner_addr'), v.get('acris_url','https://a836-acris.nyc.gov/DS/DocumentSearch/Index'), v.get('dos_info'))}
             </div>"""
         html += '</div>'
 
