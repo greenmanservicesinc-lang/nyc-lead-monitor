@@ -658,6 +658,7 @@ def owner_html(owner_name, owner_addr, acris_url, dos_info=None):
 # ── Send Email ────────────────────────────────────────────────
 def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
     total = len(hpd) + len(dohmh) + len(c311) + len(dob) + len(ecb) + len(craigslist) + len(reddit)
+    print(f"  Building email: HPD={len(hpd)}, DOHMH={len(dohmh)}, 311={len(c311)}, DOB={len(dob)}, ECB={len(ecb)}")
 
     if total == 0:
         print("No new leads found — skipping email.")
@@ -698,15 +699,20 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
         code_labels = {'04L':'🐭 Mice','04M':'🐀 Rats','04N':'🪳 Roaches','08A':'🚪 Not Vermin-Proof'}
         html += f'<div class="section"><h2>🍽️ DOHMH Restaurant Violations ({len(dohmh)} new)</h2>'
         for v in dohmh[:15]:
-            label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
-            html += f"""
-            <div class="lead">
-                <div class="address">📍 {v.get('restaurant','N/A')}</div>
-                <div><span class="label">Address:</span> {v['address']} &nbsp;|&nbsp; <span class="label">Phone:</span> {v.get('phone','N/A')}</div>
-                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:150]}</div>
-                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
-            </div>"""
+            try:
+                label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
+                html += f"""
+                <div class="lead">
+                    <div class="address">📍 {v.get('restaurant','N/A')}</div>
+                    <div><span class="label">Address:</span> {v.get('address','N/A')} &nbsp;|&nbsp; <span class="label">Phone:</span> {v.get('phone','N/A')}</div>
+                    <div><span class="label">Type:</span> {label} — {v.get('violation','')[:150]}</div>
+                    <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
+                </div>"""
+            except Exception as e:
+                print(f"  DOHMH email render error: {e}")
+                continue
         html += '</div>'
+        print(f"  DOHMH section added to email OK")
 
     # ── 311 Complaints ──
     if c311:
