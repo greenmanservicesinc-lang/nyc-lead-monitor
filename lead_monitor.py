@@ -632,33 +632,28 @@ def check_reddit():
 
 # ── Owner HTML Block ──────────────────────────────────────────
 def owner_html(owner_name, owner_addr, acris_url, dos_info=None):
-    html = ''
+    parts = []
 
     if owner_name:
-        html += f"""
-        <div style="margin-top:8px; padding:10px; background:#e8f4e8; border-radius:4px; border-left:3px solid #28a745;">
-            <div style="font-weight:bold; color:#28a745;">👤 Owner: <span style="color:#000;">{owner_name}</span></div>
-            {'<div>📬 ' + owner_addr + '</div>' if owner_addr else ''}
-        </div>"""
-    
+        owner_line = f'<span style="color:#28a745;font-weight:bold;">👤 {owner_name}</span>'
+        if owner_addr:
+            owner_line += f' &nbsp;|&nbsp; 📬 {owner_addr}'
+        parts.append(owner_line)
+
     if dos_info:
-        html += f"""
-        <div style="margin-top:6px; padding:10px; background:#e8f0fe; border-radius:4px; border-left:3px solid #4a6cf7;">
-            <div style="font-weight:bold; color:#4a6cf7;">🏢 NY DOS: <span style="color:#000;">{dos_info.get('entity_type','')}</span></div>
-            {'<div>👤 CEO/Officer: <strong>' + dos_info["ceo"] + '</strong></div>' if dos_info.get('ceo') else ''}
-            {'<div>🧑‍💼 Agent: ' + dos_info["agent"] + '</div>' if dos_info.get('agent') else ''}
-            {'<div>📮 Process Address: ' + dos_info["process"] + '</div>' if dos_info.get('process') else ''}
-            {'<a href="' + dos_info["dos_url"] + '" style="display:inline-block;margin-top:5px;background:#4a6cf7;color:white;padding:4px 10px;text-decoration:none;border-radius:4px;font-size:.85em;">NY DOS Record →</a>' if dos_info.get('dos_url') else ''}
-        </div>"""
+        dos_line = f'🏢 <strong>{dos_info.get("entity_type","")}</strong>'
+        if dos_info.get('ceo'):
+            dos_line += f' &nbsp;|&nbsp; Officer: {dos_info["ceo"]}'
+        elif dos_info.get('agent'):
+            dos_line += f' &nbsp;|&nbsp; Agent: {dos_info["agent"]}'
+        if dos_info.get('dos_url'):
+            dos_line += f' &nbsp;<a href="{dos_info["dos_url"]}" style="color:#4a6cf7;font-size:.85em;">[DOS →]</a>'
+        parts.append(dos_line)
 
-    html += f"""
-        <div style="margin-top:6px;">
-            <a href="{acris_url}"
-               style="background:#0066ff;color:white;padding:5px 12px;text-decoration:none;border-radius:4px;font-size:.85em;">
-               🔍 ACRIS Property Record →</a>
-        </div>"""
+    acris_link = f'<a href="{acris_url}" style="color:#0066ff;font-size:.85em;">[ACRIS →]</a>'
+    parts.append(acris_link)
 
-    return html
+    return '<div style="margin-top:5px;font-size:.9em;">' + ' &nbsp; '.join(parts) + '</div>'
 
 # ── Send Email ────────────────────────────────────────────────
 def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
@@ -687,8 +682,8 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
     hpd_other     = [v for v in hpd if v.get('class') != 'C']
 
     if hpd_emergency:
-        html += f'<div class="section"><h2>🚨 EMERGENCY HPD Violations — Class C ({len(hpd_emergency)} new)</h2>'
-        for v in hpd_emergency[:8]:
+        html += f'<div class="section"><h2>🚨 EMERGENCY HPD — Class C ({len(hpd_emergency)} new)</h2>'
+        for v in hpd_emergency[:15]:
             html += f"""
             <div class="lead emergency">
                 <div class="address">📍 {v['address']}</div>
@@ -698,10 +693,36 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
             </div>"""
         html += '</div>'
 
-    # ── ECB (already fined — hot leads) ──
+    # ── DOHMH Restaurants ──
+    if dohmh:
+        code_labels = {'04L':'🐭 Mice','04M':'🐀 Rats','04N':'🪳 Roaches','08A':'🚪 Not Vermin-Proof'}
+        html += f'<div class="section"><h2>🍽️ DOHMH Restaurant Violations ({len(dohmh)} new)</h2>'
+        for v in dohmh[:15]:
+            label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {v.get('restaurant','N/A')}</div>
+                <div><span class="label">Address:</span> {v['address']} &nbsp;|&nbsp; <span class="label">Phone:</span> {v.get('phone','N/A')}</div>
+                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:150]}</div>
+                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
+            </div>"""
+        html += '</div>'
+
+    # ── 311 Complaints ──
+    if c311:
+        html += f'<div class="section"><h2>📞 311 Complaints ({len(c311)} new)</h2>'
+        for c in c311[:15]:
+            html += f"""
+            <div class="lead">
+                <div class="address">📍 {c['address']}</div>
+                <div><span class="label">Type:</span> {c.get('descriptor','')} &nbsp;|&nbsp; <span class="label">Status:</span> {c.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {c.get('created_date','N/A')}</div>
+            </div>"""
+        html += '</div>'
+
+    # ── ECB Violations ──
     if ecb:
         html += f'<div class="section"><h2>⚖️ ECB Violations — Already Fined ({len(ecb)} new)</h2>'
-        for v in ecb[:8]:
+        for v in ecb[:15]:
             html += f"""
             <div class="lead">
                 <div class="address">📍 {v['address']}</div>
@@ -711,36 +732,10 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
             </div>"""
         html += '</div>'
 
-    # ── DOHMH Restaurants ──
-    if dohmh:
-        code_labels = {'04L':'🐭 Mice','04M':'🐀 Rats','04N':'🪳 Roaches','08A':'🚪 Not Vermin-Proof'}
-        html += f'<div class="section"><h2>🍽️ DOHMH Restaurant Violations ({len(dohmh)} new)</h2>'
-        for v in dohmh[:8]:
-            label = code_labels.get(v.get('violation_code',''), v.get('violation_code',''))
-            html += f"""
-            <div class="lead">
-                <div class="address">📍 {v.get('restaurant','N/A')}</div>
-                <div><span class="label">Address:</span> {v['address']} &nbsp;|&nbsp; <span class="label">Phone:</span> {v.get('phone','N/A')}</div>
-                <div><span class="label">Type:</span> {label} — {v.get('violation','')[:120]}</div>
-                <div><span class="label">Inspected:</span> {v.get('inspection_date','N/A')}</div>
-            </div>"""
-        html += '</div>'
-
-    # ── 311 Complaints ──
-    if c311:
-        html += f'<div class="section"><h2>📞 311 Complaints ({len(c311)} new)</h2>'
-        for c in c311[:8]:
-            html += f"""
-            <div class="lead">
-                <div class="address">📍 {c['address']}</div>
-                <div><span class="label">Type:</span> {c.get('descriptor','')} &nbsp;|&nbsp; <span class="label">Status:</span> {c.get('status','N/A')} &nbsp;|&nbsp; <span class="label">Date:</span> {c.get('created_date','N/A')}</div>
-            </div>"""
-        html += '</div>'
-
     # ── DOB Violations ──
     if dob:
         html += f'<div class="section"><h2>🏗️ DOB Building Violations ({len(dob)} new)</h2>'
-        for v in dob[:8]:
+        for v in dob[:15]:
             html += f"""
             <div class="lead">
                 <div class="address">📍 {v['address']}</div>
@@ -750,10 +745,10 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
             </div>"""
         html += '</div>'
 
-    # ── HPD Other (non-emergency) ──
+    # ── HPD Other ──
     if hpd_other:
-        html += f'<div class="section"><h2>🏛️ HPD Housing Violations — Other ({len(hpd_other)} new)</h2>'
-        for v in hpd_other[:8]:
+        html += f'<div class="section"><h2>🏛️ HPD Violations — Other ({len(hpd_other)} new)</h2>'
+        for v in hpd_other[:15]:
             html += f"""
             <div class="lead">
                 <div class="address">📍 {v['address']}</div>
@@ -766,7 +761,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
     # ── Craigslist ──
     if craigslist:
         html += f'<div class="section"><h2>📋 Craigslist ({len(craigslist)} new)</h2>'
-        for p in craigslist[:5]:
+        for p in craigslist[:10]:
             html += f"""
             <div class="lead">
                 <div class="address">{p.get('title','N/A')}</div>
@@ -777,7 +772,7 @@ def send_email_alert(hpd, dohmh, c311, dob, ecb, craigslist, reddit):
     # ── Reddit ──
     if reddit:
         html += f'<div class="section"><h2>💬 Reddit ({len(reddit)} new)</h2>'
-        for p in reddit[:5]:
+        for p in reddit[:10]:
             html += f"""
             <div class="lead">
                 <div class="address">{p.get('title','N/A')}</div>
