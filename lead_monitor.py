@@ -367,50 +367,89 @@ def check_311_complaints():
 # ── DOB Violations (FIXED) ────────────────────────────────────
 def check_dob_violations():
     print("Checking DOB violations...")
-    # Correct endpoint: DOB violations dataset
     base_url = "https://data.cityofnewyork.us/resource/3h2n-5cm9.json"
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     pest_kw  = ['pest', 'vermin', 'rodent', 'rat', 'mice', 'roach', 'infestation',
-                'unsanitary', 'filth', 'garbage']
+                'unsanitary', 'filth', 'garbage', 'extermination']
     all_violations = []
     seen = load_seen_leads()
 
     try:
-        params = {
-            '$where': f"issue_date > '{week_ago}T00:00:00'",
-            '$limit': 100
-        }
-        r = requests.get(base_url, params=params, timeout=30)
-        if r.status_code != 200:
-            print(f"  DOB: status {r.status_code}")
-            return []
+        # First: get 1 record to see actual field names
+        r_test = requests.get(base_url, params={'$limit': 1}, timeout=30)
+        if r_test.status_code == 200 and r_test.json():
+            print(f"  DOB fields: {list(r_test.json()[0].keys())}")
 
-        for v in r.json():
+        # Try multiple date field names
+        for date_field in ['issue_date', 'issuedate', 'violation_date', 'date_entered']:
+            params = {
+                '$where': f"{date_field} > '{week_ago}T00:00:00'",
+                '$limit': 100
+            }
+            r = requests.get(base_url, params=params, timeout=30)
+            if r.status_code == 200 and r.json():
+                print(f"  DOB: date field '{date_field}' works, got {len(r.json())} records")
+                records = r.json()
+                break
+            else:
+                print(f"  DOB: date field '{date_field}' failed (status {r.status_code})")
+                records = []
+
+        if not records:
+            # Last resort: get latest 100 records with no date filter
+            r2 = requests.get(base_url, params={'$limit': 100, '$order': 'isndobbisviol DESC'}, timeout=30)
+            if r2.status_code == 200:
+                records = r2.json()
+                print(f"  DOB: fallback got {len(records)} records")
+
+        for v in records:
             if not isinstance(v, dict):
                 continue
-            desc = str(v.get('description', '') or v.get('violation_type', '')).lower()
+            # Try multiple description field names
+            desc = str(
+                v.get('description', '') or
+                v.get('violation_type', '') or
+                v.get('novdescription', '') or
+                v.get('violationcategory', '') or
+                v.get('violation_category', '')
+            ).lower()
+
             if not any(k in desc for k in pest_kw):
                 continue
-            vid = str(v.get('isn_dob_bis_viol', v.get('number', '')))
-            if vid and vid not in seen['dob']:
-                addr_str = f"{v.get('house_number', '')} {v.get('street', '')}".strip()
-                borough  = str(v.get('borough', '')).upper()
-                bbl = str(v.get('bbl', '')).strip()
-                owner_name, owner_addr = lookup_owner_from_bbl(bbl)
-                acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
-                dos_info  = lookup_ny_dos(owner_name) if owner_name else None
-                all_violations.append({
-                    'id':          vid,
-                    'address':     f"{addr_str}, {borough}",
-                    'description': v.get('description', v.get('violation_type', 'N/A')),
-                    'issue_date':  str(v.get('issue_date', ''))[:10],
-                    'disposition': v.get('disposition_date', 'Open'),
-                    'owner_name':  owner_name,
-                    'owner_addr':  owner_addr,
-                    'acris_url':   acris_url,
-                    'dos_info':    dos_info
-                })
-                seen['dob'].append(vid)
+
+            # Try multiple ID field names
+            vid = str(
+                v.get('isn_dob_bis_viol', '') or
+                v.get('isndobbisviol', '') or
+                v.get('number', '') or
+                v.get('violationnumber', '')
+            )
+            if not vid or vid in seen['dob']:
+                continue
+
+            # Try multiple address field names
+            house  = v.get('house_number', '') or v.get('housenumber', '') or v.get('house', '')
+            street = v.get('street', '') or v.get('streetname', '') or v.get('street_name', '')
+            addr_str = f"{house} {street}".strip()
+            borough  = str(v.get('borough', '') or v.get('boro', '')).upper()
+            bbl = str(v.get('bbl', '')).strip()
+
+            owner_name, owner_addr = lookup_owner_from_bbl(bbl)
+            acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+            dos_info  = lookup_ny_dos(owner_name) if owner_name else None
+
+            all_violations.append({
+                'id':          vid,
+                'address':     f"{addr_str}, {borough}",
+                'description': desc[:200],
+                'issue_date':  str(v.get('issue_date', v.get('issuedate', v.get('date_entered', ''))))[:10],
+                'owner_name':  owner_name,
+                'owner_addr':  owner_addr,
+                'acris_url':   acris_url,
+                'dos_info':    dos_info
+            })
+            seen['dob'].append(vid)
+
     except Exception as e:
         print(f"  DOB error: {e}")
 
@@ -421,11 +460,7 @@ def check_dob_violations():
 
 # ── ECB Violations (NEW) ──────────────────────────────────────
 def check_ecb_violations():
-    """
-    ECB = Environmental Control Board violations.
-    These are fines issued for building code violations including
-    pest/sanitary conditions. Hot leads — owner already got fined.
-    """
+    """ECB = Environmental Control Board violations — fines for pest/sanitary issues."""
     print("Checking ECB violations...")
     base_url = "https://data.cityofnewyork.us/resource/6bgk-3dad.json"
     week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -435,42 +470,73 @@ def check_ecb_violations():
     seen = load_seen_leads()
 
     try:
-        params = {
-            '$where': f"issue_date > '{week_ago}T00:00:00'",
-            '$limit': 100
-        }
-        r = requests.get(base_url, params=params, timeout=30)
-        if r.status_code != 200:
-            print(f"  ECB: status {r.status_code}")
-            return []
+        # Debug: get 1 record to see field names
+        r_test = requests.get(base_url, params={'$limit': 1}, timeout=30)
+        if r_test.status_code == 200 and r_test.json():
+            print(f"  ECB fields: {list(r_test.json()[0].keys())}")
 
-        for v in r.json():
+        records = []
+        for date_field in ['issue_date', 'issuedate', 'violation_date', 'served_date']:
+            params = {'$where': f"{date_field} > '{week_ago}T00:00:00'", '$limit': 100}
+            r = requests.get(base_url, params=params, timeout=30)
+            if r.status_code == 200 and r.json():
+                records = r.json()
+                print(f"  ECB: date field '{date_field}' works, got {len(records)} records")
+                break
+            else:
+                print(f"  ECB: date field '{date_field}' failed (status {r.status_code})")
+
+        if not records:
+            r2 = requests.get(base_url, params={'$limit': 100}, timeout=30)
+            if r2.status_code == 200:
+                records = r2.json()
+                print(f"  ECB: fallback got {len(records)} records")
+
+        for v in records:
             if not isinstance(v, dict):
                 continue
-            desc = str(v.get('violation_description', '') or v.get('section_law_description', '')).lower()
+            desc = str(
+                v.get('violation_description', '') or
+                v.get('section_law_description', '') or
+                v.get('description', '') or
+                v.get('novdescription', '')
+            ).lower()
             if not any(k in desc for k in pest_kw):
                 continue
-            vid = str(v.get('ecb_violation_number', v.get('isn_dob_bis_viol', '')))
-            if vid and vid not in seen['ecb']:
-                addr_str = f"{v.get('house_number', '')} {v.get('street_name', '')}".strip()
-                borough  = str(v.get('borough', '')).upper()
-                bbl = str(v.get('bbl', '')).strip()
-                owner_name, owner_addr = lookup_owner_from_bbl(bbl)
-                acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
-                dos_info  = lookup_ny_dos(owner_name) if owner_name else None
-                all_violations.append({
-                    'id':          vid,
-                    'address':     f"{addr_str}, {borough}",
-                    'description': v.get('violation_description', v.get('section_law_description', 'N/A')),
-                    'issue_date':  str(v.get('issue_date', ''))[:10],
-                    'fine':        v.get('penalty_imposed', 'N/A'),
-                    'status':      v.get('ecb_violation_status', 'N/A'),
-                    'owner_name':  owner_name,
-                    'owner_addr':  owner_addr,
-                    'acris_url':   acris_url,
-                    'dos_info':    dos_info
-                })
-                seen['ecb'].append(vid)
+
+            vid = str(
+                v.get('ecb_violation_number', '') or
+                v.get('isn_dob_bis_viol', '') or
+                v.get('isndobbisviol', '') or
+                v.get('number', '')
+            )
+            if not vid or vid in seen['ecb']:
+                continue
+
+            house  = v.get('house_number', '') or v.get('housenumber', '') or v.get('house', '')
+            street = v.get('street_name', '') or v.get('street', '') or v.get('streetname', '')
+            addr_str = f"{house} {street}".strip()
+            borough  = str(v.get('borough', '') or v.get('boro', '')).upper()
+            bbl = str(v.get('bbl', '')).strip()
+
+            owner_name, owner_addr = lookup_owner_from_bbl(bbl)
+            acris_url = bbl_to_acris_url(bbl) or "https://a836-acris.nyc.gov/DS/DocumentSearch/Index"
+            dos_info  = lookup_ny_dos(owner_name) if owner_name else None
+
+            all_violations.append({
+                'id':          vid,
+                'address':     f"{addr_str}, {borough}",
+                'description': desc[:200],
+                'issue_date':  str(v.get('issue_date', v.get('issuedate', v.get('served_date', ''))))[:10],
+                'fine':        v.get('penalty_imposed', v.get('penaltyimposed', 'N/A')),
+                'status':      v.get('ecb_violation_status', v.get('violationstatus', 'N/A')),
+                'owner_name':  owner_name,
+                'owner_addr':  owner_addr,
+                'acris_url':   acris_url,
+                'dos_info':    dos_info
+            })
+            seen['ecb'].append(vid)
+
     except Exception as e:
         print(f"  ECB error: {e}")
 
